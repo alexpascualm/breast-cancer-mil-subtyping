@@ -1,0 +1,1 @@
+DB_PATH = "/mnt/ART-HDD-001/IHC4BC_Compressed/"
