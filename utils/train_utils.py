@@ -174,9 +174,7 @@ def run_epoch(
     y_pred = torch.cat(all_y_pred).numpy()
     y_prob = torch.cat(all_y_prob).numpy()
 
-    # Para tareas binarias pasamos la probabilidad de la clase positiva
-    y_prob_for_metrics = y_prob[:, 1] if y_prob.shape[1] == 2 else None
-    metrics = compute_breast_metrics(task, y_true, y_pred, y_prob_for_metrics)
+    metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
 
     heatmap_df = pd.DataFrame(heatmap_list) if inference_heatmap else None
 
