@@ -26,7 +26,7 @@ class PatchClassifierVIT(nn.Module):
         self,
         num_classes: int = 2,
         unfreeze_backbone: bool = False,
-        model_name: str = "vit_base_patch16_224.dino",
+        model_name: str = "vit_base_patch16_224.dino", # "vit_base_patch16_224.dino", "hf-hub:MahmoodLab/uni" (CC-BY-NC-ND 4.0)
         mil_aggregation_mode: str = "max",
         chunk_size: int = 512,
     ):

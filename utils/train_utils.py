@@ -5,8 +5,8 @@ import pandas as pd
 import random
 import numpy as np
 import sys
-
 from tqdm import tqdm
+from sklearn.model_selection import GroupShuffleSplit
 
 from models.patch_encoders.VIT_model import PatchClassifierVIT
 from utils.metrics_utils import compute_breast_metrics
@@ -72,6 +72,41 @@ def compute_class_weights(labels, num_classes):
     weights = 1.0 / (counts + 1e-8)
     weights = weights / weights.sum() * num_classes
     return weights
+
+
+def make_splits(df, label_col, seed):
+    """
+    Divide el DataFrame en índices de train / val / test respetando grupos
+    de paciente y estratificando por etiqueta.
+
+    El DataFrame recibido ya debe estar filtrado (sin etiquetas -1) y tener
+    la columna 'patient_id' como string.
+
+    Proporciones: 70% train · 20% val · 10% test.
+
+    Args:
+        df        : pd.DataFrame filtrado para la tarea.
+        label_col : str  columna de etiquetas (== task name).
+        seed      : int  semilla para reproducibilidad.
+
+    Returns:
+        train_idx, val_idx, test_idx  — arrays de índices sobre df.
+    """
+    gss_test = GroupShuffleSplit(test_size=0.10, n_splits=1, random_state=seed)
+    train_val_idx, test_idx = next(
+        gss_test.split(df.index, df[label_col], groups=df["patient_id"])
+    )
+
+    val_frac = 0.20 / 0.90
+    gss_val  = GroupShuffleSplit(test_size=val_frac, n_splits=1, random_state=seed)
+    train_idx, val_idx = next(
+        gss_val.split(
+            train_val_idx,
+            df.loc[train_val_idx, label_col],
+            groups=df.loc[train_val_idx, "patient_id"],
+        )
+    )
+    return train_idx, val_idx, test_idx
 
 
 # ──────────────────────────────────────────────────────────────────────────────

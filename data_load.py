@@ -75,8 +75,8 @@ def create_file_label_df(
             'features':                os.path.join(images_path, f),
             'patient_id':              row.get('Patient ID', slide_id),
             # ── Molecular subtype ──────────────────────────────────────────
-            'molecular_subtype':       str(row.get('Molecular subtype', '')).strip(),
-            'molecular_subtype_label': molecular_subtype_label,
+            'molecular_subtype':     molecular_subtype_label,        
+            'molecular_subtype_str': str(row.get('Molecular subtype', '')).strip(),  
             # ── Biomarkers: one binary label per marker ───────────────────
             'er':   BIOMARKER_BINARY_MAP.get(str(row.get('ER',   '')).strip(), -1),
             'pr':   BIOMARKER_BINARY_MAP.get(str(row.get('PR',   '')).strip(), -1),
@@ -179,11 +179,7 @@ class BreastWSI_Dataset(Dataset):
 
     # ── Label builder ─────────────────────────────────────────────────────────
     def _build_label(self, row) -> torch.Tensor:
-        if self.task == 'molecular_subtype':
-            return torch.tensor(int(row['molecular_subtype_label']), dtype=torch.long)
-        else:
-            # Individual biomarker tasks: 'er', 'pr', 'her2', 'ki67'
-            return torch.tensor(int(row[self.task]), dtype=torch.long)
+        return torch.tensor(int(row[self.task]), dtype=torch.long)
 
     # ── PyTorch interface ─────────────────────────────────────────────────────
     def __len__(self):
@@ -260,7 +256,8 @@ if __name__ == '__main__':
         ki67_threshold=0.14,
     )
     print(df.head())
-    print("\nMolecular subtype distribution:\n", df['molecular_subtype'].value_counts())
+    print("\nMolecular subtype (Codes) distribution:\n", df['molecular_subtype'].value_counts())
+    print("\nMolecular subtype (Names) distribution:\n", df['molecular_subtype_str'].value_counts())
     print("\nKi67 binary distribution:\n", df['ki67'].value_counts())
     print("\nER binary distribution:\n", df['er'].value_counts())
     print("\nPR binary distribution:\n", df['pr'].value_counts())
@@ -284,7 +281,7 @@ if __name__ == '__main__':
         imgs, label, wsi_id, coords = ds_subtype[i]
         print(f"\n   WSI {i}")
         print(f"   wsi_id     : {wsi_id}")
-        print(f"   label        : {label.item()} ({df.iloc[i]['molecular_subtype']})")
+        print(f"   label        : {label.item()} ({df.iloc[i]['molecular_subtype_str']})")
         print(f"   imgs shape   : {imgs.shape}  → (num_parches, C, H, W)")
         if coords is not None:
             coords_arr = np.array(coords)

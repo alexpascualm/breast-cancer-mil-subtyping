@@ -10,12 +10,10 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from sklearn.model_selection import GroupShuffleSplit
-
 from accelerate import Accelerator
 
 from data_load import BreastWSI_Dataset, create_file_label_df, collate_fn
-from utils.train_utils import set_multiple_seed, get_model, compute_class_weights, run_epoch
+from utils.train_utils import set_multiple_seed, get_model, compute_class_weights, make_splits, run_epoch
 from utils.metrics_utils import log_epoch_metrics, save_metrics_to_csv
 from config import bcnb_images_folder_path, bcnb_labels_df_path, results_folder_path
 
@@ -58,7 +56,7 @@ def parse_args():
                         choices=["SGD", "AdamW"])
     parser.add_argument("--momentum",      type=float, default=0.9,
                         help="Solo para SGD")
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay",  type=float, default=1e-5)
     parser.add_argument("--weighted_loss", action="store_true",
                         help="Aplicar pesos de clase en la función de pérdida")
@@ -72,18 +70,19 @@ def parse_args():
     parser.add_argument("--resume_training",        action="store_true")
     parser.add_argument("--pretrained_model_path",  type=str, default=None)
 
-    parser.add_argument("--hiperparam_tuning",      action="store_true")
+    parser.add_argument("--multiple_experiments",      action="store_true")
 
     return parser.parse_args()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MAIN — carga de datos
+# MAIN — carga de datos, filtrado y splits para la tarea principal
 # ──────────────────────────────────────────────────────────────────────────────
-def main():
-    args = parse_args()
+def main(args=None):
+    if args is None:
+        args = parse_args()
     accelerator = Accelerator()
-    device = accelerator.device
+    device      = accelerator.device
 
     print(f"Dispositivo: {device}", flush=True)
     torch.cuda.empty_cache()
@@ -99,35 +98,23 @@ def main():
         ki67_threshold=args.ki67_threshold,
     )
 
-    # ── Filtro opcional por tipo histológico ──────────────────────────────────
+    # ── Filtro histológico opcional ───────────────────────────────────────────
     if args.filter_ductal:
         before = len(df)
         df = df[df["tumour_type"] == "Invasive ductal carcinoma"].reset_index(drop=True)
         print(f"Filtro ductal: {before} → {len(df)} WSIs", flush=True)
 
-    # ── Descartar WSIs sin etiqueta válida para la tarea ──────────────────────
-    label_col = "molecular_subtype_label" if args.task == "molecular_subtype" else args.task
+    # ── Conversion de Patient ID a string ─────────────────────────────────────
+    df["patient_id"] = df["patient_id"].astype(str)
+
+    # ── Filtrar etiquetas inválidas para la tarea principal ───────────────────
+    label_col    = args.task
     df = df[df[label_col] != -1].reset_index(drop=True)
     print(f"WSIs con etiqueta válida para '{args.task}': {len(df)}", flush=True)
     print(f"Distribución:\n{df[label_col].value_counts()}", flush=True)
 
-    # ── Splits train / val / test (por paciente, estratificado) ───────────────
-    df["patient_id"] = df["patient_id"].astype(str)
-
-    gss_test = GroupShuffleSplit(test_size=0.10, n_splits=1, random_state=args.seed)
-    train_val_idx, test_idx = next(
-        gss_test.split(df.index, df[label_col], groups=df["patient_id"])
-    )
-
-    val_frac = 0.20 / 0.90
-    gss_val = GroupShuffleSplit(test_size=val_frac, n_splits=1, random_state=args.seed)
-    train_idx, val_idx = next(
-        gss_val.split(
-            train_val_idx,
-            df.loc[train_val_idx, label_col],
-            groups=df.loc[train_val_idx, "patient_id"],
-        )
-    )
+    # ── Splits ────────────────────────────────────────────────────────────────
+    train_idx, val_idx, test_idx = make_splits(df, label_col, args.seed)
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     t0 = time.time()
@@ -177,8 +164,9 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
                            else f"{args.optimizer}_mom{args.momentum}"
         small            = "_small" if args.small_dataset_for_test else ""
         ductal           = "_ductal" if args.filter_ductal else ""
+        weighted_loss    = "_weighted_loss" if args.weighted_loss else ""
         run_name = (
-            f"{nickname}{timestamp}_task-{args.task}{ductal}"
+            f"{nickname}{timestamp}_task-{args.task}{ductal}{weighted_loss}"
             f"_model-{args.patch_model}_{freeze_status}"
             f"_MIL-{args.mil_aggregation_mode}"
             f"_{opt_name}_lr{args.learning_rate}_wd{args.weight_decay}"
@@ -194,11 +182,12 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
 
     # ── Pérdida ───────────────────────────────────────────────────────────────
     if args.weighted_loss:
-        label_col    = "molecular_subtype_label" if args.task == "molecular_subtype" else args.task
+        label_col    = args.task
         train_labels = df.iloc[list(ds_train.indices)][label_col].tolist()
         weights      = compute_class_weights(train_labels, num_classes).to(device)
         criterion    = nn.CrossEntropyLoss(weight=weights)
-        print(f"Pesos de clase: {weights.cpu().tolist()}", flush=True)
+        for cls, w in enumerate(weights.cpu().tolist()):
+            print(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})", flush=True)
     else:
         criterion = nn.CrossEntropyLoss()
 
@@ -305,32 +294,20 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
 if __name__ == "__main__":
     ds_train, ds_val, ds_test, df, accelerator, device, args = main()
 
-    if not args.hiperparam_tuning:
+    if not args.multiple_experiments:
         run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args)
     else:
         print("Lanzando grid de experimentos ...", flush=True)
         experiments = [
-            dict(task="molecular_subtype", mil_aggregation_mode="attentionMIL"),
-            dict(task="er",  mil_aggregation_mode="attentionMIL"),
-            dict(task="pr",  mil_aggregation_mode="attentionMIL"),
-            dict(task="her2",mil_aggregation_mode="attentionMIL"),
-            dict(task="ki67",mil_aggregation_mode="attentionMIL"),
+            dict(task="molecular_subtype"),
+            dict(task="er"),
+            dict(task="pr"),
+            dict(task="her2"),
+            dict(task="ki67"),
         ]
         for exp in experiments:
             exp_args = copy.deepcopy(args)
             for k, v in exp.items():
                 setattr(exp_args, k, v)
-            # Recrear datasets con la tarea del experimento si cambia
-            if exp_args.task != args.task:
-                label_col = "molecular_subtype_label" if exp_args.task == "molecular_subtype" else exp_args.task
-                valid_df  = df[df[label_col] != -1].reset_index(drop=True)
-                exp_ds_train = BreastWSI_Dataset(valid_df, list(range(int(len(valid_df)*0.70))),
-                                                 task=exp_args.task, load_on_demand=exp_args.load_on_demand)
-                exp_ds_val   = BreastWSI_Dataset(valid_df, list(range(int(len(valid_df)*0.70),
-                                                                       int(len(valid_df)*0.90))),
-                                                 task=exp_args.task, load_on_demand=exp_args.load_on_demand)
-                exp_ds_test  = BreastWSI_Dataset(valid_df, list(range(int(len(valid_df)*0.90), len(valid_df))),
-                                                 task=exp_args.task, load_on_demand=exp_args.load_on_demand)
-                run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, valid_df, accelerator, device, exp_args)
-            else:
-                run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, exp_args)
+            exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _, _, _ = main(exp_args)
+            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, accelerator, device, exp_args)
