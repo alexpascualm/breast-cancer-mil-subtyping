@@ -82,7 +82,7 @@ def make_splits(df, label_col, seed):
     El DataFrame recibido ya debe estar filtrado (sin etiquetas -1) y tener
     la columna 'patient_id' como string.
 
-    Proporciones: 70% train · 20% val · 10% test.
+    Proporciones: 70% train · 15% val · 15% test.
 
     Args:
         df        : pd.DataFrame filtrado para la tarea.
