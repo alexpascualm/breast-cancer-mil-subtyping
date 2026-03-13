@@ -92,12 +92,12 @@ def make_splits(df, label_col, seed):
     Returns:
         train_idx, val_idx, test_idx  — arrays de índices sobre df.
     """
-    gss_test = GroupShuffleSplit(test_size=0.10, n_splits=1, random_state=seed)
+    gss_test = GroupShuffleSplit(test_size=0.15, n_splits=1, random_state=seed)
     train_val_idx, test_idx = next(
         gss_test.split(df.index, df[label_col], groups=df["patient_id"])
     )
 
-    val_frac = 0.20 / 0.90
+    val_frac = 0.15 / 0.85
     gss_val  = GroupShuffleSplit(test_size=val_frac, n_splits=1, random_state=seed)
     train_idx, val_idx = next(
         gss_val.split(
