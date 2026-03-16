@@ -81,10 +81,7 @@ def parse_args():
 def main(args=None):
     if args is None:
         args = parse_args()
-    accelerator = Accelerator()
-    device      = accelerator.device
-
-    print(f"Dispositivo: {device}", flush=True)
+    
     torch.cuda.empty_cache()
     set_multiple_seed(args.seed)
 
@@ -128,7 +125,7 @@ def main(args=None):
     print(f"Tiempo de carga: {time.time() - t0:.1f}s  "
           f"(train={len(ds_train)}, val={len(ds_val)}, test={len(ds_test)})", flush=True)
 
-    return ds_train, ds_val, ds_test, df, accelerator, device, args
+    return ds_train, ds_val, ds_test, df, args
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -292,9 +289,13 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
 # ENTRY POINT
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    ds_train, ds_val, ds_test, df, accelerator, device, args = main()
+    args = parse_args()
+    accelerator = Accelerator()
+    device      = accelerator.device
+    print(f"Dispositivo: {device}", flush=True)
 
     if not args.multiple_experiments:
+        ds_train, ds_val, ds_test, df, args = main(args)
         run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args)
     else:
         print("Lanzando grid de experimentos ...", flush=True)
@@ -309,5 +310,5 @@ if __name__ == "__main__":
             exp_args = copy.deepcopy(args)
             for k, v in exp.items():
                 setattr(exp_args, k, v)
-            exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _, _, _ = main(exp_args)
+            exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _ = main(exp_args)
             run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, accelerator, device, exp_args)
