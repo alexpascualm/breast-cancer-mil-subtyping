@@ -64,7 +64,7 @@ def create_file_label_df(
         row = row.iloc[0]
 
         try:
-            molecular_subtype_label = map_molecular_subtype(row.get('Molecular subtype', ''))
+            molecular_subtype_label = map_molecular_subtype(row.get('Molecular subtype', -1))
         except ValueError as e:
             print(f"  [WARN] {slide_id}: {e} - skipping.")
             continue

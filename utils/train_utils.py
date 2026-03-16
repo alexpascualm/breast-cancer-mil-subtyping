@@ -6,7 +6,7 @@ import random
 import numpy as np
 import sys
 from tqdm import tqdm
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import StratifiedGroupKFold
 
 from models.patch_encoders.VIT_model import PatchClassifierVIT
 from utils.metrics_utils import compute_breast_metrics
@@ -77,35 +77,52 @@ def compute_class_weights(labels, num_classes):
 def make_splits(df, label_col, seed):
     """
     Divide el DataFrame en índices de train / val / test respetando grupos
-    de paciente y estratificando por etiqueta.
-
+    de paciente y estratificando por etiqueta (StratifiedGroupKFold).
     El DataFrame recibido ya debe estar filtrado (sin etiquetas -1) y tener
     la columna 'patient_id' como string.
-
     Proporciones: 70% train · 15% val · 15% test.
-
+    Imprime las proporciones de clase del DataFrame completo y de cada split.
     Args:
         df        : pd.DataFrame filtrado para la tarea.
         label_col : str  columna de etiquetas (== task name).
         seed      : int  semilla para reproducibilidad.
-
     Returns:
-        train_idx, val_idx, test_idx  — arrays de índices sobre df.
+        train_idx, val_idx, test_idx  — arrays de índices posicionales sobre df.
     """
-    gss_test = GroupShuffleSplit(test_size=0.15, n_splits=1, random_state=seed)
+    def print_proportions(name, indices):
+        subset = df.iloc[indices] if not isinstance(indices, pd.Index) else df.loc[indices]
+        counts = subset[label_col].value_counts().sort_index()
+        props  = subset[label_col].value_counts(normalize=True).sort_index()
+        print(f"\n  [{name}]  n={len(subset)}")
+        for cls in counts.index:
+            print(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})")
+
+    print("=" * 45)
+    print(f"SPLITS — tarea: '{label_col}'  seed={seed}")
+    print("=" * 45)
+
+    print_proportions("TOTAL", df.index)
+
+    # Test split: 1 fold de 7 ≈ 15%
+    sgkf_test = StratifiedGroupKFold(n_splits=7, shuffle=True, random_state=seed)
     train_val_idx, test_idx = next(
-        gss_test.split(df.index, df[label_col], groups=df["patient_id"])
+        sgkf_test.split(df.index, df[label_col], groups=df["patient_id"])
     )
 
-    val_frac = 0.15 / 0.85
-    gss_val  = GroupShuffleSplit(test_size=val_frac, n_splits=1, random_state=seed)
-    train_idx, val_idx = next(
-        gss_val.split(
-            train_val_idx,
-            df.loc[train_val_idx, label_col],
-            groups=df.loc[train_val_idx, "patient_id"],
-        )
+    # Val split: 1 fold de 6 sobre train+val ≈ 15% del total
+    sub = df.iloc[train_val_idx]
+    sgkf_val = StratifiedGroupKFold(n_splits=6, shuffle=True, random_state=seed)
+    rel_train_idx, rel_val_idx = next(
+        sgkf_val.split(sub.index, sub[label_col], groups=sub["patient_id"])
     )
+    train_idx = train_val_idx[rel_train_idx]
+    val_idx   = train_val_idx[rel_val_idx]
+
+    for name, idx in [("TRAIN", train_idx), ("VAL", val_idx), ("TEST", test_idx)]:
+        print_proportions(name, idx)
+
+    print("=" * 45)
+
     return train_idx, val_idx, test_idx
 
 
