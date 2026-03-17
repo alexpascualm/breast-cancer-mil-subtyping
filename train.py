@@ -197,7 +197,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
                                 weight_decay=args.weight_decay)
 
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5,
-                                  patience=8, min_lr=1e-6, threshold=1e-3)
+        patience=10, min_lr=1e-7, threshold=1e-4)
 
     # ── Accelerate ────────────────────────────────────────────────────────────
     model, optimizer, scheduler, train_loader, val_loader, test_loader = accelerator.prepare(
@@ -239,10 +239,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
             save_metrics_to_csv(val_metrics, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "val_metrics.csv"))
 
+        accelerator.wait_for_everyone()
         scheduler.step(val_loss)
 
         # Checkpoint / Early Stopping
-        accelerator.wait_for_everyone()
         if val_loss < best_val_loss:
             best_val_loss, no_improve = val_loss, 0
               
