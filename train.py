@@ -11,6 +11,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from accelerate import Accelerator
+import gc
 
 from data_load import BreastWSI_Dataset, create_file_label_df, collate_fn
 from utils.train_utils import set_multiple_seed, get_model, compute_class_weights, make_splits, run_epoch
@@ -82,7 +83,6 @@ def main(args=None):
     if args is None:
         args = parse_args()
     
-    torch.cuda.empty_cache()
     set_multiple_seed(args.seed)
 
     # ── DataFrame maestro ─────────────────────────────────────────────────────
@@ -290,11 +290,11 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     args = parse_args()
-    accelerator = Accelerator()
-    device      = accelerator.device
-    print(f"Dispositivo: {device}", flush=True)
 
     if not args.multiple_experiments:
+        accelerator = Accelerator()
+        device      = accelerator.device
+        print(f"Dispositivo: {device}", flush=True)
         ds_train, ds_val, ds_test, df, args = main(args)
         run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args)
     else:
@@ -311,4 +311,12 @@ if __name__ == "__main__":
             for k, v in exp.items():
                 setattr(exp_args, k, v)
             exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _ = main(exp_args)
-            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, accelerator, device, exp_args)
+            exp_accelerator = Accelerator()
+            exp_device      = exp_accelerator.device
+            print(f"Dispositivo: {exp_device}", flush=True)
+            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, exp_accelerator, exp_device, exp_args)
+            exp_accelerator.free_memory()
+            del exp_ds_train, exp_ds_val, exp_ds_test, exp_df
+            del exp_accelerator
+            torch.cuda.empty_cache()
+            gc.collect()
