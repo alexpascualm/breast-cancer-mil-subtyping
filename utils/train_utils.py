@@ -89,41 +89,58 @@ def make_splits(df, label_col, seed):
     Returns:
         train_idx, val_idx, test_idx  — arrays de índices posicionales sobre df.
     """
-    def print_proportions(name, indices):
+    def get_proportions_str(name, indices):
         subset = df.iloc[indices] if not isinstance(indices, pd.Index) else df.loc[indices]
         counts = subset[label_col].value_counts().sort_index()
         props  = subset[label_col].value_counts(normalize=True).sort_index()
-        print(f"\n  [{name}]  n={len(subset)}")
+
+        lines = [f"\n  [{name}]  n={len(subset)}"]
         for cls in counts.index:
-            print(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})")
+            lines.append(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})")
+
+        return "\n".join(lines)
 
     print("=" * 45)
     print(f"SPLITS — tarea: '{label_col}'  seed={seed}")
     print("=" * 45)
 
-    print_proportions("TOTAL", df.index)
+    # Acumulador de texto
+    report_lines = []
+    report_lines.append("=" * 45)
+    report_lines.append(f"SPLITS — tarea: '{label_col}'  seed={seed}")
+    report_lines.append("=" * 45)
 
-    # Test split: 1 fold de 7 ≈ 15%
+    total_str = get_proportions_str("TOTAL", df.index)
+    print(total_str)
+    report_lines.append(total_str)
+
+    # Test split
     sgkf_test = StratifiedGroupKFold(n_splits=7, shuffle=True, random_state=seed)
     train_val_idx, test_idx = next(
         sgkf_test.split(df.index, df[label_col], groups=df["patient_id"])
     )
 
-    # Val split: 1 fold de 6 sobre train+val ≈ 15% del total
+    # Val split
     sub = df.iloc[train_val_idx]
     sgkf_val = StratifiedGroupKFold(n_splits=6, shuffle=True, random_state=seed)
     rel_train_idx, rel_val_idx = next(
         sgkf_val.split(sub.index, sub[label_col], groups=sub["patient_id"])
     )
+
     train_idx = train_val_idx[rel_train_idx]
     val_idx   = train_val_idx[rel_val_idx]
 
     for name, idx in [("TRAIN", train_idx), ("VAL", val_idx), ("TEST", test_idx)]:
-        print_proportions(name, idx)
+        split_str = get_proportions_str(name, idx)
+        print(split_str)
+        report_lines.append(split_str)
 
     print("=" * 45)
+    report_lines.append("=" * 45)
 
-    return train_idx, val_idx, test_idx
+    report_str = "\n".join(report_lines)
+
+    return train_idx, val_idx, test_idx, report_str
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -111,7 +111,7 @@ def main(args=None):
     print(f"Distribución:\n{df[label_col].value_counts()}", flush=True)
 
     # ── Splits ────────────────────────────────────────────────────────────────
-    train_idx, val_idx, test_idx = make_splits(df, label_col, args.seed)
+    train_idx, val_idx, test_idx, split_report_str = make_splits(df, label_col, args.seed)
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     t0 = time.time()
@@ -125,13 +125,13 @@ def main(args=None):
     print(f"Tiempo de carga: {time.time() - t0:.1f}s  "
           f"(train={len(ds_train)}, val={len(ds_val)}, test={len(ds_test)})", flush=True)
 
-    return ds_train, ds_val, ds_test, df, args
+    return ds_train, ds_val, ds_test, df, args, split_report_str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # EXPERIMENT
 # ──────────────────────────────────────────────────────────────────────────────
-def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
+def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, split_report_str):
 
     # ── DataLoaders ───────────────────────────────────────────────────────────
     train_loader = DataLoader(ds_train, batch_size=args.batch_size, shuffle=True,
@@ -176,6 +176,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
     best_model_path = os.path.join(run_results_path, "best_model")
     last_model_path = os.path.join(run_results_path, "last_model")
     log_path        = os.path.join(run_results_path, "train_log.txt")
+    
+    # Log splits distributions
+    with open(log_path, "a") as f:
+        f.write(split_report_str + "\n")
 
     # ── Pérdida ───────────────────────────────────────────────────────────────
     if args.weighted_loss:
@@ -183,8 +187,13 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args):
         train_labels = df.iloc[list(ds_train.indices)][label_col].tolist()
         weights      = compute_class_weights(train_labels, num_classes).to(device)
         criterion    = nn.CrossEntropyLoss(weight=weights)
+        print("Aplicando perdida con pesos por clase", flush=True)
+        with open(log_path, "a") as f:
+                f.write("Aplicando perdida con pesos por clase" + "\n")
         for cls, w in enumerate(weights.cpu().tolist()):
             print(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})", flush=True)
+            with open(log_path, "a") as f:
+                f.write(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})" + "\n")
     else:
         criterion = nn.CrossEntropyLoss()
 
@@ -295,8 +304,8 @@ if __name__ == "__main__":
         accelerator = Accelerator()
         device      = accelerator.device
         print(f"Dispositivo: {device}", flush=True)
-        ds_train, ds_val, ds_test, df, args = main(args)
-        run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args)
+        ds_train, ds_val, ds_test, df, args, split_report_str = main(args)
+        run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, split_report_str)
     else:
         print("Lanzando grid de experimentos ...", flush=True)
         experiments = [
@@ -310,11 +319,11 @@ if __name__ == "__main__":
             exp_args = copy.deepcopy(args)
             for k, v in exp.items():
                 setattr(exp_args, k, v)
-            exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _ = main(exp_args)
+            exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _, split_report_str = main(exp_args)
             exp_accelerator = Accelerator()
             exp_device      = exp_accelerator.device
             print(f"Dispositivo: {exp_device}", flush=True)
-            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, exp_accelerator, exp_device, exp_args)
+            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, exp_accelerator, exp_device, exp_args, split_report_str)
             exp_accelerator.free_memory()
             del exp_ds_train, exp_ds_val, exp_ds_test, exp_df
             del exp_accelerator
