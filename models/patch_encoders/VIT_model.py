@@ -91,7 +91,8 @@ class PatchClassifierVIT(nn.Module):
             feats     = self.backbone.forward_features(chunk_gpu)  # (chunk, N+1, D)
             cls       = feats[:, 0, :]                             # (chunk, D)
             logits    = self.classifier(cls)                       # (chunk, num_classes)
-            probs     = F.softmax(logits, dim=1)
+            # probs     = F.softmax(logits, dim=1)
+            probs = logits
             all_cls_tokens.append(cls)
             all_probs.append(probs)
 

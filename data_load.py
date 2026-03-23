@@ -34,7 +34,7 @@ def create_file_label_df(
     slide_col : str
         Column in the Excel whose values match the .h5 file stems (without extension).
     small_dataset_for_test : bool
-        If True, only the first 100 rows of the Excel are used.
+        If True, only the first rows of the Excel are used.
     ki67_threshold : float
         Cut-off to binarise Ki67 (default KI67_THRESHOLD = 0.14).
 
@@ -53,7 +53,7 @@ def create_file_label_df(
     records = []
     wsis = [f for f in os.listdir(images_path) if f.endswith('.h5')]
     if small_dataset_for_test:
-        wsis = wsis[:100]
+        wsis = wsis[:30]
 
     for f in tqdm(wsis, desc="Processing breast WSIs", file=sys.stdout):
         slide_id = f.replace('.h5', '')
