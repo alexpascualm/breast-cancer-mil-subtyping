@@ -26,9 +26,9 @@ class PatchClassifierVIT(nn.Module):
         self,
         num_classes: int = 2,
         unfreeze_backbone: bool = False,
-        model_name: str = "vit_base_patch16_224.dino", # "vit_base_patch16_224.dino", "hf-hub:MahmoodLab/uni" (CC-BY-NC-ND 4.0)
-        mil_aggregation_mode: str = "max",
-        chunk_size: int = 512,
+        model_name: str = "vit_large_patch14_dinov2",
+        mil_aggregation_mode: str = "attentionMIL",
+        chunk_size: int = 128,
     ):
         super().__init__()
 
@@ -36,7 +36,11 @@ class PatchClassifierVIT(nn.Module):
         self.num_classes = num_classes
 
         # ── Backbone ──────────────────────────────────────────────────────────
-        self.backbone = timm.create_model(model_name, pretrained=True)
+        self.backbone = timm.create_model(
+                            model_name,
+                            pretrained=True,
+                            img_size=448
+                        )
         self.backbone.reset_classifier(0)           # quitar cabeza de clasificación
         embed_dim = self.backbone.num_features      # 768 para ViT-B
 
@@ -90,7 +94,11 @@ class PatchClassifierVIT(nn.Module):
         for chunk in chunks:
             chunk_gpu = chunk.to(device, non_blocking=True)
             feats     = self.backbone.forward_features(chunk_gpu)  # (chunk, N+1, D)
-            cls       = feats[:, 0, :]                             # (chunk, D)
+            
+            # cls       = feats[:, 0, :]             # CLS (chunk, D)
+            cls = feats[:, 1:, :].mean(dim=1)        # mean pooling sin CLS (chunk, D)
+            # cls = feats.mean(dim=1)                # mean pooling incluyendo CLS (chunk, D)
+            
             logits    = self.classifier(cls)                       # (chunk, num_classes)
             # probs     = F.softmax(logits, dim=1)
             probs = logits
