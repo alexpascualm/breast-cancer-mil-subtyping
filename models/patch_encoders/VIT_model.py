@@ -33,6 +33,7 @@ class PatchClassifierVIT(nn.Module):
         super().__init__()
 
         self.chunk_size = chunk_size
+        self.num_classes = num_classes
 
         # ── Backbone ──────────────────────────────────────────────────────────
         self.backbone = timm.create_model(model_name, pretrained=True)

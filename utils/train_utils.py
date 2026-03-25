@@ -10,6 +10,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 
 from models.patch_encoders.VIT_model import PatchClassifierVIT
 from utils.metrics_utils import compute_breast_metrics
+from sklearn.metrics import confusion_matrix
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SETUP
@@ -173,6 +174,7 @@ def run_epoch(
 
     Returns:
         metrics (dict): métricas de la época.
+        conf_mat_df (pd.DataFrame): matriz de confusión.
         epoch_loss (float): pérdida media.
         heatmap_df (pd.DataFrame | None): DataFrame con info de heatmap o None.
     """
@@ -244,7 +246,14 @@ def run_epoch(
     y_prob = torch.cat(all_y_prob).numpy()
 
     metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
+    
+    conf_mat = confusion_matrix(y_true, y_pred, labels=np.arange(model.num_classes))
+    conf_mat_df = pd.DataFrame(
+                conf_mat,
+                index=[f"true_{i}" for i in range(conf_mat.shape[0])],
+                columns=[f"pred_{i}" for i in range(conf_mat.shape[1])]
+            )
 
     heatmap_df = pd.DataFrame(heatmap_list) if inference_heatmap else None
 
-    return metrics, epoch_loss, heatmap_df
+    return metrics, conf_mat_df, epoch_loss, heatmap_df

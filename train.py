@@ -229,7 +229,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
             print(f"\n──── Epoch {epoch} ────", flush=True)
 
         # Train
-        train_metrics, train_loss, _ = run_epoch(
+        train_metrics, train_conf_mat, train_loss, _ = run_epoch(
             model, train_loader, device, accelerator,
             criterion, optimizer, task=args.task, mode="train",
         )
@@ -237,9 +237,14 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
             log_epoch_metrics(epoch, "Train", args.task, train_metrics, train_loss, log_path)
             save_metrics_to_csv(train_metrics, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "train_metrics.csv"))
+            with open(log_path, "a") as f:
+                    f.write("\n Matriz de confusión en Train:\n")
+                    f.write(train_conf_mat.to_string())
+                    f.write("\n\n")
+            
 
         # Val
-        val_metrics, val_loss, _ = run_epoch(
+        val_metrics, val_conf_mat, val_loss, _ = run_epoch(
             model, val_loader, device, accelerator,
             criterion, None, task=args.task, mode="val",
         )
@@ -247,6 +252,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
             log_epoch_metrics(epoch, "Val", args.task, val_metrics, val_loss, log_path)
             save_metrics_to_csv(val_metrics, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "val_metrics.csv"))
+            with open(log_path, "a") as f:
+                    f.write("\n Matriz de confusión en Validación:\n")
+                    f.write(val_conf_mat.to_string())
+                    f.write("\n\n")
 
         accelerator.wait_for_everyone()
         scheduler.step(val_loss)
@@ -259,8 +268,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
                 accelerator.save_state(best_model_path)
                 print(f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})", flush=True)
                 with open(log_path, "a") as f:
-                    f.write(f"  Mejor modelo guardado (val_loss={best_val_loss:.4f})\n")
-        else:
+                    f.write(f" Mejor modelo guardado (val_loss={best_val_loss:.4f})\n")
             no_improve += 1
             if no_improve >= args.patience:
                 if accelerator.is_main_process:
@@ -284,7 +292,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     except Exception as e:
         print(f"Error cargando checkpoint: {e}", flush=True)
 
-    test_metrics, test_loss, _ = run_epoch(
+    test_metrics, test_conf_mat, test_loss, _ = run_epoch(
         model, test_loader, device, accelerator,
         criterion, None, task=args.task, mode="test",
     )
@@ -292,6 +300,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         log_epoch_metrics("Test", "Test", args.task, test_metrics, test_loss, log_path)
         save_metrics_to_csv(test_metrics, epoch=0, task=args.task,
                             filepath=os.path.join(run_results_path, "test_metrics.csv"))
+        with open(log_path, "a") as f:
+                    f.write("\n Matriz de confusión en Test:\n")
+                    f.write(test_conf_mat.to_string())
+                    f.write("\n\n")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
