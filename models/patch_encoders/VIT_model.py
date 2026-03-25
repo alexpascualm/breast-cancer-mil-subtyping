@@ -95,9 +95,9 @@ class PatchClassifierVIT(nn.Module):
             chunk_gpu = chunk.to(device, non_blocking=True)
             feats     = self.backbone.forward_features(chunk_gpu)  # (chunk, N+1, D)
             
-            # cls       = feats[:, 0, :]             # CLS (chunk, D)
-            cls = feats[:, 1:, :].mean(dim=1)        # mean pooling sin CLS (chunk, D)
-            # cls = feats.mean(dim=1)                # mean pooling incluyendo CLS (chunk, D)
+            cls       = feats[:, 0, :]             # CLS (chunk, D)
+            # cls = feats[:, 1:, :].mean(dim=1)    # mean pooling sin CLS (chunk, D)
+            # cls = feats.mean(dim=1)              # mean pooling incluyendo CLS (chunk, D)
             
             logits    = self.classifier(cls)                       # (chunk, num_classes)
             
