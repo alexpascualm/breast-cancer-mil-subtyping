@@ -200,7 +200,7 @@ def run_epoch(
         labels = labels.to(device)   # (B,) LongTensor
 
         # ── Forward ───────────────────────────────────────────────────────────
-        wsi_logits, patch_probs_list, weights_list = model(inputs)
+        wsi_logits, patch_logits_list, weights_list = model(inputs)
         # wsi_logits: (B, num_classes)
 
         # ── Loss ──────────────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ def run_epoch(
                     "pred_label":  preds[i].item(),
                     "true_label":  labels[i].item(),
                     "coords":      coords[i],
-                    "patch_scores": torch.argmax(patch_probs_list[i], dim=1).cpu().numpy(),
+                    "patch_scores": torch.argmax(patch_logits_list[i], dim=1).cpu().numpy(),
                     "weights":      weights_list[i],
                 })
 

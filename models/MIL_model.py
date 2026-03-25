@@ -25,7 +25,7 @@ class attentionMIL_instance(nn.Module):
 
     def forward(self, logits_ws, features_ws):
         """
-        logits_ws: (N, num_classes) probabilities/logits per parche de esta WSI
+        logits_ws: (N, num_classes) logits per parche de esta WSI
         features_ws: (N, L) embeddings (cls tokens) per parche de esta WSI
         """
         if features_ws.numel() == 0:
@@ -48,37 +48,37 @@ class MILArchitecture(nn.Module):
             assert self.L is not None, "L_value required for attentionMIL"
             self.attentionModule = attentionMIL_instance(self.L)
 
-    def forward(self, patch_probs, patch_feats, lengths):
+    def forward(self, patch_logits, patch_feats, lengths):
         """
-        patch_probs: Tensor (N_total, C)  (probabilidades por parche)
+        patch_logits: Tensor (N_total, C)  (logits por parche)
         patch_feats: Tensor (N_total, L)  (embeddings cls per parche)
         lengths: list[int] (n_parches por WSI), sum(lengths) == N_total
         Devuelve: Tensor (batch_size, C) con logits/score por WSI
         """
-        assert patch_probs.dim() == 2
+        assert patch_logits.dim() == 2
         assert patch_feats.dim() == 2
 
         # Dividir por WSI
-        probs_splits = torch.split(patch_probs, lengths, dim=0)
+        logits_splits = torch.split(patch_logits, lengths, dim=0)
         feats_splits = torch.split(patch_feats, lengths, dim=0)
 
         wsis, weights = [],[]
         if self.aggregation == 'max':
-            for p in probs_splits:
+            for p in logits_splits:
                 if p.size(0) == 0:
-                    wsis.append(torch.zeros(self.nClasses, device=patch_probs.device))
+                    wsis.append(torch.zeros(self.nClasses, device=logits_splits.device))
                 else:
                     wsis.append(torch.max(p, dim=0)[0])
                 weights.append(None)
         elif self.aggregation == 'mean':
-            for p in probs_splits:
+            for p in logits_splits:
                 if p.size(0) == 0:
-                    wsis.append(torch.zeros(self.nClasses, device=patch_probs.device))
+                    wsis.append(torch.zeros(self.nClasses, device=logits_splits.device))
                 else:
                     wsis.append(torch.mean(p, dim=0))
                 weights.append(None)
         elif self.aggregation == 'attentionMIL':
-            for p, f in zip(probs_splits, feats_splits):
+            for p, f in zip(logits_splits, feats_splits):
                 wsi, weight = self.attentionModule(p, f)
                 wsis.append(wsi)
                 weights.append(weight)

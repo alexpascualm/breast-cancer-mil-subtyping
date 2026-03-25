@@ -42,7 +42,7 @@ class PatchClassifierVIT(nn.Module):
                             img_size=448
                         )
         self.backbone.reset_classifier(0)           # quitar cabeza de clasificación
-        embed_dim = self.backbone.num_features      # 768 para ViT-B
+        embed_dim = self.backbone.num_features
 
         # Congelar todo por defecto
         for param in self.backbone.parameters():
@@ -90,7 +90,7 @@ class PatchClassifierVIT(nn.Module):
         all_patches_cpu = torch.cat(inputs_list, dim=0)
         chunks = torch.split(all_patches_cpu, self.chunk_size, dim=0)
 
-        all_cls_tokens, all_probs = [], []
+        all_cls_tokens, all_logits = [], []
         for chunk in chunks:
             chunk_gpu = chunk.to(device, non_blocking=True)
             feats     = self.backbone.forward_features(chunk_gpu)  # (chunk, N+1, D)
@@ -100,17 +100,16 @@ class PatchClassifierVIT(nn.Module):
             # cls = feats.mean(dim=1)                # mean pooling incluyendo CLS (chunk, D)
             
             logits    = self.classifier(cls)                       # (chunk, num_classes)
-            # probs     = F.softmax(logits, dim=1)
-            probs = logits
+            
             all_cls_tokens.append(cls)
-            all_probs.append(probs)
+            all_logits.append(logits)
 
         total_feats = torch.cat(all_cls_tokens, dim=0)  # (N_total, D)
-        total_probs = torch.cat(all_probs,      dim=0)  # (N_total, num_classes)
+        total_logtis = torch.cat(all_logits,      dim=0)  # (N_total, num_classes)
 
         # MIL aggregation
-        wsi_logits, weights_list = self.mil(total_probs, total_feats, lengths)
+        wsi_logits, weights_list = self.mil(total_logtis, total_feats, lengths)
 
-        patch_probs_list = list(torch.split(total_probs, lengths, dim=0))
+        patch_logits_list = list(torch.split(total_logtis, lengths, dim=0))
 
-        return wsi_logits, patch_probs_list, weights_list
+        return wsi_logits, patch_logits_list, weights_list
