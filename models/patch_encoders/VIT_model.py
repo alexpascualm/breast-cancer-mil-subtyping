@@ -26,20 +26,23 @@ class PatchClassifierVIT(nn.Module):
         self,
         num_classes: int = 2,
         unfreeze_backbone: bool = False,
-        model_name: str = "vit_large_patch14_dinov2",
+        model_name: str = "vit_large_patch14_dinov2", # vit_base_patch16_224.dino
         mil_aggregation_mode: str = "attentionMIL",
+        patch_embedding_mode: int = 0,
+        patch_size: int =224,
         chunk_size: int = 128,
     ):
         super().__init__()
 
-        self.chunk_size = chunk_size
         self.num_classes = num_classes
+        self.patch_embedding_mode = patch_embedding_mode
+        self.chunk_size = chunk_size
 
         # ── Backbone ──────────────────────────────────────────────────────────
         self.backbone = timm.create_model(
                             model_name,
                             pretrained=True,
-                            img_size=448
+                            img_size=patch_size
                         )
         self.backbone.reset_classifier(0)           # quitar cabeza de clasificación
         embed_dim = self.backbone.num_features
@@ -90,21 +93,24 @@ class PatchClassifierVIT(nn.Module):
         all_patches_cpu = torch.cat(inputs_list, dim=0)
         chunks = torch.split(all_patches_cpu, self.chunk_size, dim=0)
 
-        all_cls_tokens, all_logits = [], []
+        all_emmbeddings, all_logits = [], []
         for chunk in chunks:
             chunk_gpu = chunk.to(device, non_blocking=True)
             feats     = self.backbone.forward_features(chunk_gpu)  # (chunk, N+1, D)
             
-            cls       = feats[:, 0, :]             # CLS (chunk, D)
-            # cls = feats[:, 1:, :].mean(dim=1)    # mean pooling sin CLS (chunk, D)
-            # cls = feats.mean(dim=1)              # mean pooling incluyendo CLS (chunk, D)
+            if self.patch_embedding_mode == 0:
+                emmbedding       = feats[:, 0, :]             # CLS token (representación global) (chunk, D)
+            elif self.patch_embedding_mode ==1:
+                emmbedding = feats[:, 1:, :].mean(dim=1)    # Mean pooling sin CLS (chunk, D)
+            else:
+                raise ValueError(f"patch_embedding_mode desconocido: {self.patch_embedding_mode}")
             
-            logits    = self.classifier(cls)                       # (chunk, num_classes)
+            logits    = self.classifier(emmbedding)                       # (chunk, num_classes)
             
-            all_cls_tokens.append(cls)
+            all_emmbeddings.append(emmbedding)
             all_logits.append(logits)
 
-        total_feats = torch.cat(all_cls_tokens, dim=0)  # (N_total, D)
+        total_feats = torch.cat(all_emmbeddings, dim=0)  # (N_total, D)
         total_logtis = torch.cat(all_logits,      dim=0)  # (N_total, num_classes)
 
         # MIL aggregation

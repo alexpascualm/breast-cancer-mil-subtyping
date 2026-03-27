@@ -34,7 +34,7 @@ def set_multiple_seed(seed: int = 42, deterministic: bool = True):
     print(f"[INFO] Semilla fijada en {seed} (deterministic={deterministic})")
 
 
-def get_model(patch_encoder_type, mil_aggregation_mode, unfreeze_backbone, num_classes):
+def get_model(patch_encoder_type, mil_aggregation_mode, unfreeze_backbone, patch_embedding_mode, num_classes):
     """
     Instancia el encoder de parches seleccionado.
 
@@ -51,6 +51,7 @@ def get_model(patch_encoder_type, mil_aggregation_mode, unfreeze_backbone, num_c
         return PatchClassifierVIT(
             num_classes=num_classes,
             mil_aggregation_mode=mil_aggregation_mode,
+            patch_embedding_mode=patch_embedding_mode,
             unfreeze_backbone=unfreeze_backbone,
         )
     else:

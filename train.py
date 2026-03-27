@@ -48,6 +48,14 @@ def parse_args():
                         choices=["max", "mean", "attentionMIL"])
     parser.add_argument("--chunk_size",                 type=int,  default=512,
                         help="Tamaño de mini-batch interno de parches (control VRAM)")
+    parser.add_argument("--patch_resize_size",                 type=int,  default=224,
+                        help="Dimensiones de reescalado de los parches")
+    parser.add_argument("--patch_embedding_mode",                 type=int,  default=0,
+                        help=(
+                            "Modo de obtención del embedding de cada patch a partir de la salida del ViT. "
+                            "0: usar el token CLS (representación global aprendida). "
+                            "1: mean pooling de los tokens espaciales (promedio de subpatches, sin CLS)."
+                        ))
 
     # ── Entrenamiento ─────────────────────────────────────────────────────────
     parser.add_argument("--batch_size",    type=int,   default=8)
@@ -116,11 +124,11 @@ def main(args=None):
     # ── Datasets ──────────────────────────────────────────────────────────────
     t0 = time.time()
     print("Cargando datasets ...", flush=True)
-    ds_train = BreastWSI_Dataset(df, train_idx, task=args.task,
+    ds_train = BreastWSI_Dataset(df, train_idx, task=args.task, patch_resize_size = args.patch_resize_size,
                                  load_on_demand=args.load_on_demand)
-    ds_val   = BreastWSI_Dataset(df, val_idx,   task=args.task,
+    ds_val   = BreastWSI_Dataset(df, val_idx,   task=args.task,  patch_resize_size = args.patch_resize_size,
                                  load_on_demand=args.load_on_demand)
-    ds_test  = BreastWSI_Dataset(df, test_idx,  task=args.task,
+    ds_test  = BreastWSI_Dataset(df, test_idx,  task=args.task,  patch_resize_size = args.patch_resize_size,
                                  load_on_demand=args.load_on_demand)
     print(f"Tiempo de carga: {time.time() - t0:.1f}s  "
           f"(train={len(ds_train)}, val={len(ds_val)}, test={len(ds_test)})", flush=True)
@@ -148,6 +156,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         args.patch_model,
         args.mil_aggregation_mode,
         args.unfreeze_patch_model_backbone,
+        args.patch_embedding_mode,
         num_classes=num_classes,
     ).to(device)
 
@@ -321,11 +330,11 @@ if __name__ == "__main__":
     else:
         print("Lanzando grid de experimentos ...", flush=True)
         experiments = [
-            dict(task="molecular_subtype"),
             dict(task="er"),
             dict(task="pr"),
             dict(task="her2"),
             dict(task="ki67"),
+            dict(task="molecular_subtype"),
         ]
         for exp in experiments:
             exp_args = copy.deepcopy(args)

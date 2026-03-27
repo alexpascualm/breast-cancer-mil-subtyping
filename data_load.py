@@ -132,6 +132,7 @@ class BreastWSI_Dataset(Dataset):
         dataframe: pd.DataFrame,
         indices,
         task: str = 'molecular_subtype',
+        patch_resize_size: int = 224,
         load_on_demand: bool = False,
         inference_heatmap: bool = False,
     ):
@@ -142,12 +143,13 @@ class BreastWSI_Dataset(Dataset):
         self.dataframe         = dataframe
         self.indices           = list(indices)
         self.task              = task
+        self.patch_resize_size = patch_resize_size
         self.load_on_demand    = bool(load_on_demand)
         self.inference_heatmap = bool(inference_heatmap)
 
         self.transform = T.Compose([
             T.ToTensor(),
-            T.Resize((448, 448), antialias=True),
+            T.Resize((patch_resize_size, patch_resize_size), antialias=True),
             T.Normalize(mean=[0.485, 0.456, 0.406],
                         std=[0.229, 0.224, 0.225]),
         ])
