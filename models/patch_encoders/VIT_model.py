@@ -26,7 +26,7 @@ class PatchClassifierVIT(nn.Module):
         self,
         num_classes: int = 2,
         unfreeze_backbone: bool = False,
-        model_name: str = "vit_large_patch14_dinov2", # vit_base_patch16_224.dino
+        model_name: str = "vit_base_patch16_224.dino", # vit_base_patch16_224.dino, vit_large_patch14_dinov2
         mil_aggregation_mode: str = "attentionMIL",
         patch_embedding_mode: int = 0,
         patch_size: int =224,
