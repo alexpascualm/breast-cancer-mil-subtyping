@@ -34,7 +34,7 @@ def set_multiple_seed(seed: int = 42, deterministic: bool = True):
     print(f"[INFO] Semilla fijada en {seed} (deterministic={deterministic})")
 
 
-def get_model(patch_encoder_type, mil_aggregation_mode, unfreeze_backbone, patch_embedding_mode, num_classes):
+def get_model(patch_encoder_type: str = "VIT", mil_aggregation_mode: str = "attentionMIL", unfreeze_backbone: bool = False, patch_embedding_mode: int = 0, num_classes: int = 2):
     """
     Instancia el encoder de parches seleccionado.
 
@@ -42,6 +42,7 @@ def get_model(patch_encoder_type, mil_aggregation_mode, unfreeze_backbone, patch
         patch_encoder_type (str): 'VIT' (único soportado actualmente).
         mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL'.
         unfreeze_backbone (bool): descongelar backbone del encoder.
+        patch_embedding_mode (int): modo de embedding de las feats extraidas por parche (Depende de patch_encoder_type)
         num_classes (int): número de clases de salida (del dataset).
 
     Returns:

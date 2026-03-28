@@ -119,6 +119,8 @@ class BreastWSI_Dataset(Dataset):
         Row indices into dataframe to use.
     task : str
         'molecular_subtype', 'er', 'pr', 'her2', or 'ki67'.
+    patch_resize_size: int
+        WSI-patchs resize cuadratic size for model inputs
     load_on_demand : bool
         False → pre-load all patch tensors into CPU RAM.
         True  → read H5 in __getitem__ (lower RAM, slower I/O).

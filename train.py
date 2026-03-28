@@ -153,10 +153,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     num_classes = ds_train.num_classes
     print(f"Cargando modelo '{args.patch_model}' — num_classes={num_classes} ...", flush=True)
     model = get_model(
-        args.patch_model,
-        args.mil_aggregation_mode,
-        args.unfreeze_patch_model_backbone,
-        args.patch_embedding_mode,
+        patch_encoder_type=args.patch_model,
+        mil_aggregation_mode=args.mil_aggregation_mode,
+        unfreeze_backbone=args.unfreeze_patch_model_backbone,
+        patch_embedding_mode=args.patch_embedding_mode,
         num_classes=num_classes,
     ).to(device)
 
