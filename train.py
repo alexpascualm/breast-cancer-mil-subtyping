@@ -268,7 +268,15 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
 
         accelerator.wait_for_everyone()
         scheduler.step(val_loss)
-
+        
+        # Save last model for resume_training option
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            accelerator.save_state(last_model_path)
+            print(f"Época {epoch} — {time.time() - t_ep:.1f}s", flush=True)
+            with open(log_path, "a") as f:
+                f.write(f"Época {epoch} — {time.time() - t_ep:.1f}s\n")
+        
         # Checkpoint / Early Stopping
         if val_loss < best_val_loss:
             best_val_loss, no_improve = val_loss, 0
@@ -278,18 +286,12 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
                 print(f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})", flush=True)
                 with open(log_path, "a") as f:
                     f.write(f" Mejor modelo guardado (val_loss={best_val_loss:.4f})\n")
+        else:
             no_improve += 1
             if no_improve >= args.patience:
                 if accelerator.is_main_process:
                     print("Early stopping activado.", flush=True)
                 break
-
-        accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            accelerator.save_state(last_model_path)
-            print(f"Época {epoch} — {time.time() - t_ep:.1f}s", flush=True)
-            with open(log_path, "a") as f:
-                f.write(f"Época {epoch} — {time.time() - t_ep:.1f}s\n")
 
     # ── Test ──────────────────────────────────────────────────────────────────
     if accelerator.is_main_process:
