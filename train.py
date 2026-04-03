@@ -3,6 +3,7 @@ import os
 import copy
 from datetime import datetime
 import time
+from huggingface_hub import login
 
 import torch
 import torch.nn as nn
@@ -81,6 +82,9 @@ def parse_args():
 
     parser.add_argument("--multiple_experiments",      action="store_true")
 
+    parser.add_argument('--hf_token', type=str, default=None,
+                        help="HuggingFace token para descargar modelos privados")
+
     return parser.parse_args()
 
 
@@ -90,7 +94,11 @@ def parse_args():
 def main(args=None):
     if args is None:
         args = parse_args()
-    
+        
+    # HuggingFace login para modelos privados
+    if args.hf_token:
+        login(token=args.hf_token)
+
     set_multiple_seed(args.seed)
 
     # ── DataFrame maestro ─────────────────────────────────────────────────────
@@ -246,6 +254,8 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
             log_epoch_metrics(epoch, "Train", args.task, train_metrics, train_loss, log_path)
             save_metrics_to_csv(train_metrics, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "train_metrics.csv"))
+            print("\n --- Matriz de confusión en Train ---\n", flush = True)
+            print(train_conf_mat)
             with open(log_path, "a") as f:
                     f.write("\n Matriz de confusión en Train:\n")
                     f.write(train_conf_mat.to_string())
@@ -261,8 +271,11 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
             log_epoch_metrics(epoch, "Val", args.task, val_metrics, val_loss, log_path)
             save_metrics_to_csv(val_metrics, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "val_metrics.csv"))
+            
+            print("\n --- Matriz de confusión en Validación ---\n", flush = True)
+            print(val_conf_mat)
             with open(log_path, "a") as f:
-                    f.write("\n Matriz de confusión en Validación:\n")
+                    f.write("\n --- Matriz de confusión en Validación ---\n")
                     f.write(val_conf_mat.to_string())
                     f.write("\n\n")
 
@@ -311,8 +324,10 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         log_epoch_metrics("Test", "Test", args.task, test_metrics, test_loss, log_path)
         save_metrics_to_csv(test_metrics, epoch=0, task=args.task,
                             filepath=os.path.join(run_results_path, "test_metrics.csv"))
+        print("\n --- Matriz de confusión en Test ---\n", flush = True)
+        print(test_conf_mat)
         with open(log_path, "a") as f:
-                    f.write("\n Matriz de confusión en Test:\n")
+                    f.write("\n --- Matriz de confusión en Test ---\n")
                     f.write(test_conf_mat.to_string())
                     f.write("\n\n")
 

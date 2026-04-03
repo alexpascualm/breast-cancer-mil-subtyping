@@ -20,7 +20,7 @@ from sklearn.metrics import (
 # ──────────────────────────────────────────────────────────────────────────────
 # CORE METRICS
 # ──────────────────────────────────────────────────────────────────────────────
-def compute_metrics(y_true, y_pred, y_prob=None):
+def compute_multiclass_metrics(y_true, y_pred, y_prob):
     """
     Métricas estándar de clasificación multiclase.
     Si se proporcionan probabilidades, añade AUROC y AUPRC.
@@ -62,29 +62,28 @@ def compute_metrics(y_true, y_pred, y_prob=None):
     }
 
     # --- Métricas probabilísticas ---
-    if y_prob is not None:
-        try:
-            metrics["auroc_macro"]    = roc_auc_score(y_true, y_prob, multi_class="ovr", average="macro")
-            metrics["auroc_weighted"] = roc_auc_score(y_true, y_prob, multi_class="ovr", average="weighted")
+    try:
+        metrics["auroc_macro"]    = roc_auc_score(y_true, y_prob, multi_class="ovr", average="macro")
+        metrics["auroc_weighted"] = roc_auc_score(y_true, y_prob, multi_class="ovr", average="weighted")
 
-            # AUPRC multiclase
-            n_classes  = y_prob.shape[1]
-            y_true_ohe = np.eye(n_classes)[y_true]
+        # AUPRC multiclase
+        n_classes  = y_prob.shape[1]
+        y_true_ohe = np.eye(n_classes)[y_true]
 
-            metrics["auprc_macro"]    = average_precision_score(y_true_ohe, y_prob, average="macro")
-            metrics["auprc_weighted"] = average_precision_score(y_true_ohe, y_prob, average="weighted")
+        metrics["auprc_macro"]    = average_precision_score(y_true_ohe, y_prob, average="macro")
+        metrics["auprc_weighted"] = average_precision_score(y_true_ohe, y_prob, average="weighted")
 
-        except ValueError as e:
-            print(f"[WARN] AUROC/AUPRC no calculable: {e}", flush=True)
-            metrics["auroc_macro"] = float("nan")
-            metrics["auroc_weighted"] = float("nan")
-            metrics["auprc_macro"] = float("nan")
-            metrics["auprc_weighted"] = float("nan")
+    except ValueError as e:
+        print(f"[WARN] AUROC/AUPRC no calculable: {e}", flush=True)
+        metrics["auroc_macro"] = float("nan")
+        metrics["auroc_weighted"] = float("nan")
+        metrics["auprc_macro"] = float("nan")
+        metrics["auprc_weighted"] = float("nan")
 
     return metrics
 
 
-def compute_binary_metrics(y_true, y_pred, y_prob=None):
+def compute_binary_metrics(y_true, y_pred, y_prob):
     """
     Métricas para clasificación binaria.
     Añade AUROC y AUPRC si se proporcionan probabilidades.
@@ -92,7 +91,7 @@ def compute_binary_metrics(y_true, y_pred, y_prob=None):
     Args:
         y_true:  array / Tensor con etiquetas 0/1.
         y_pred:  array / Tensor con predicciones 0/1.
-        y_prob:  array / Tensor con probabilidad de la clase positiva (opcional).
+        y_prob:  array / Tensor (N, num_classes) con probabilidades
 
     Returns:
         dict con métricas binarias.
@@ -134,28 +133,36 @@ def compute_binary_metrics(y_true, y_pred, y_prob=None):
     }
 
     # --- Métricas con probabilidades ---
-    if y_prob is not None:
-        try:
-            # AUROC (clase positiva)
-            metrics["auroc"] = roc_auc_score(y_true, y_prob)
+    try:
+        y_prob_pos = y_prob[:, 1]  # para auroc y auprc_pos/neg
+        # AUROC (clase positiva)
+        metrics["auroc"] = roc_auc_score(y_true, y_prob_pos)
 
-            # AUPRC para ambas clases
-            metrics["auprc_pos"] = average_precision_score(y_true, y_prob)
-            metrics["auprc_neg"] = average_precision_score(1 - y_true, 1 - y_prob)
+        # AUPRC para ambas clases
+        metrics["auprc_pos"] = average_precision_score(y_true, y_prob_pos)
+        metrics["auprc_neg"] = average_precision_score(y_true, y_prob_pos, pos_label=0)
 
-        except ValueError as e:
-            print(f"[WARN] AUROC/AUPRC no calculable: {e}", flush=True)
-            metrics["auroc"] = float("nan")
-            metrics["auprc_pos"] = float("nan")
-            metrics["auprc_neg"] = float("nan")
+        # AUPRC macro / weighted
+        y_true_ohe = np.eye(2)[y_true]
 
+        metrics["auprc_macro"] = average_precision_score(y_true_ohe, y_prob, average="macro")
+        metrics["auprc_weighted"] = average_precision_score(y_true_ohe, y_prob, average="weighted")
+
+    except ValueError as e:
+        print(f"[WARN] AUROC/AUPRC no calculable: {e}", flush=True)
+        metrics["auroc"] = float("nan")
+        metrics["auprc_pos"] = float("nan")
+        metrics["auprc_neg"] = float("nan")
+        metrics["auprc_macro"] = float("nan")
+        metrics["auprc_weighted"] = float("nan")
+            
     return metrics
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TASK-LEVEL DISPATCHER
 # ──────────────────────────────────────────────────────────────────────────────
-def compute_breast_metrics(task, y_true, y_pred, y_prob=None):
+def compute_breast_metrics(task, y_true, y_pred, y_prob):
     """
     Selecciona la función de métricas adecuada según la tarea.
 
@@ -169,11 +176,9 @@ def compute_breast_metrics(task, y_true, y_pred, y_prob=None):
         dict con las métricas correspondientes.
     """
     if task == "molecular_subtype":
-        return compute_metrics(y_true, y_pred, y_prob)
+        return compute_multiclass_metrics(y_true, y_pred, y_prob)
     else:
-        # Para binaria pasamos solo la probabilidad de la clase positiva
-        y_prob_positive = y_prob[:, 1] if y_prob is not None else None
-        return compute_binary_metrics(y_true, y_pred, y_prob_positive)
+        return compute_binary_metrics(y_true, y_pred, y_prob)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -192,19 +197,6 @@ def log_epoch_metrics(epoch, split_name, task, metrics, loss, output_path):
         lines.append(f"  Accuracy            : {metrics['accuracy']:.4f}")
     if "balanced_accuracy" in metrics:
         lines.append(f"  Balanced Accuracy   : {metrics['balanced_accuracy']:.4f}")
-
-    # ── Métricas por clase (binario) ──────────────────────────────────────────
-    if "precision_pos" in metrics:
-        lines.append("  --- Clase positiva (1) ---")
-        lines.append(f"    Precision         : {metrics['precision_pos']:.4f}")
-        lines.append(f"    Recall            : {metrics['recall_pos']:.4f}")
-        lines.append(f"    F1                : {metrics['f1_pos']:.4f}")
-
-    if "precision_neg" in metrics:
-        lines.append("  --- Clase negativa (0) ---")
-        lines.append(f"    Precision         : {metrics['precision_neg']:.4f}")
-        lines.append(f"    Recall (Spec.)    : {metrics['recall_neg']:.4f}")
-        lines.append(f"    F1                : {metrics['f1_neg']:.4f}")
 
     # ── Métricas agregadas ────────────────────────────────────────────────────
     if "precision_macro" in metrics:
@@ -238,19 +230,27 @@ def log_epoch_metrics(epoch, split_name, task, metrics, loss, output_path):
                 lines.append(f"  AUROC ({avg})       : {metrics[k]:.4f}")
 
     # ── AUPRC ─────────────────────────────────────────────────────────────────
-    # Binaria
-    if "auprc_pos" in metrics:
-        lines.append(f"  AUPRC (pos)         : {metrics['auprc_pos']:.4f}")
-        lines.append(f"  AUPRC (neg)         : {metrics['auprc_neg']:.4f}")
-        if "auprc_macro" in metrics:
-            lines.append(f"  AUPRC (macro)       : {metrics['auprc_macro']:.4f}")
+    # Agregadas Binario/Multiclase
+    for avg in ("macro", "weighted"):
+        k = f"auprc_{avg}"
+        if k in metrics:
+            lines.append(f"  AUPRC ({avg})       : {metrics[k]:.4f}")
 
-    # Multiclase
-    else:
-        for avg in ("macro", "weighted"):
-            k = f"auprc_{avg}"
-            if k in metrics:
-                lines.append(f"  AUPRC ({avg})       : {metrics[k]:.4f}")
+    
+    # ── Métricas por clase (binario) ──────────────────────────────────────────
+    if "precision_pos" in metrics:
+        lines.append("  --- Clase positiva (1) ---")
+        lines.append(f"    Precision         : {metrics['precision_pos']:.4f}")
+        lines.append(f"    Recall            : {metrics['recall_pos']:.4f}")
+        lines.append(f"    F1                : {metrics['f1_pos']:.4f}")
+        lines.append(f"    AUPRC             : {metrics['auprc_pos']:.4f}")
+
+    if "precision_neg" in metrics:
+        lines.append("  --- Clase negativa (0) ---")
+        lines.append(f"    Precision         : {metrics['precision_neg']:.4f}")
+        lines.append(f"    Recall (Spec.)    : {metrics['recall_neg']:.4f}")
+        lines.append(f"    F1                : {metrics['f1_neg']:.4f}")
+        lines.append(f"    AUPRC             : {metrics['auprc_neg']:.4f}")
 
     
     # ── Classification report (multiclase) ────────────────────────────────────
@@ -259,14 +259,16 @@ def log_epoch_metrics(epoch, split_name, task, metrics, loss, output_path):
 
         report = metrics["classification_report"]
 
+        excluded_keys = {"accuracy", "macro avg", "weighted avg", "micro avg"}
+
         for label, stats in report.items():
-            if isinstance(stats, dict):  # clases + avg
+            if label in excluded_keys:
+                continue
+
+            if isinstance(stats, dict):  # solo clases
                 lines.append(f"    [{label}]")
                 for metric_name, value in stats.items():
                     lines.append(f"      {metric_name:10s}: {value:.4f}")
-            else:
-                # accuracy u otros escalares
-                lines.append(f"    {label:12s}: {stats:.4f}")
 
     # ── Output ────────────────────────────────────────────────────────────────
     output = "\n".join(lines)
