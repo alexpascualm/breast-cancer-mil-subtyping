@@ -180,82 +180,113 @@ def run_epoch(
         epoch_loss (float): pérdida media.
         heatmap_df (pd.DataFrame | None): DataFrame con info de heatmap o None.
     """
-    assert mode in ("train", "val", "test"), "mode debe ser 'train', 'val' o 'test'."
+    assert mode in ("train", "val", "test")
 
-    model.train() if mode == "train" else model.eval()
+    if mode == "train":
+        model.train()
+    else:
+        model.eval()
+
     torch.set_grad_enabled(mode == "train")
+
+    num_classes = 4 if task == "molecular_subtype" else 2
 
     all_y_true, all_y_pred, all_y_prob = [], [], []
     heatmap_list = []
-    total_loss_sum = 0.0
-    total_seen = torch.tensor(0, device=device)
 
-    for batch_info in tqdm(dataloader, desc=mode.upper(),
-                           disable=not accelerator.is_local_main_process,
-                           file=sys.stdout):
+    total_loss_sum = 0.0
+    total_seen = 0
+
+    for batch_info in tqdm(
+        dataloader,
+        desc=mode.upper(),
+        disable=not accelerator.is_main_process,
+        file=sys.stdout,
+    ):
 
         if inference_heatmap:
             inputs, labels, wsi_ids, coords = batch_info
         else:
             inputs, labels, wsi_ids, _ = batch_info
 
-        labels = labels.to(device)   # (B,) LongTensor
+        labels = labels.to(device)
 
-        # ── Forward ───────────────────────────────────────────────────────────
         wsi_logits, patch_logits_list, weights_list = model(inputs)
-        # wsi_logits: (B, num_classes)
-
-        # ── Loss ──────────────────────────────────────────────────────────────
         loss = criterion(wsi_logits, labels)
 
-        # ── Backward ──────────────────────────────────────────────────────────
         if mode == "train":
             optimizer.zero_grad()
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        # ── Acumulación ───────────────────────────────────────────────────────
-        batch_sz = len(inputs)
-        total_seen     += batch_sz
-        total_loss_sum += accelerator.gather(loss.detach() * batch_sz).sum().item()
+        probs = torch.softmax(wsi_logits.detach(), dim=1)
+        preds = probs.argmax(dim=1)
 
-        probs = torch.softmax(wsi_logits.detach(), dim=1).cpu()   # (B, num_classes)
-        preds = probs.argmax(dim=1)                                # (B,)
+        # Loss
+        batch_size = labels.size(0)
 
-        all_y_true.append(labels.detach().cpu())
-        all_y_pred.append(preds)
-        all_y_prob.append(probs)
+        loss_sum = loss.detach() * batch_size
 
-        # ── Heatmap info ──────────────────────────────────────────────────────
+        loss_sum_reduced = accelerator.reduce(loss_sum, reduction="sum")
+        count_reduced    = accelerator.reduce(torch.tensor(batch_size, device=device), reduction="sum")
+
+        total_loss_sum += loss_sum_reduced.item()
+        total_seen     += count_reduced.item()
+
+        # Gather métricas
+        gat_labels, gat_preds, gat_probs = accelerator.gather_for_metrics(
+            (labels, preds, probs)
+        )
+
+        if accelerator.is_main_process:
+            all_y_true.append(gat_labels.cpu())
+            all_y_pred.append(gat_preds.cpu())
+            all_y_prob.append(gat_probs.cpu())
+
+        # Heatmap: SOLO acumulación local (sin gather aquí)
         if inference_heatmap:
-            for i in range(batch_sz):
+            for i in range(len(inputs)):
                 heatmap_list.append({
                     "wsi_id":      wsi_ids[i],
                     "pred_label":  preds[i].item(),
                     "true_label":  labels[i].item(),
                     "coords":      coords[i],
                     "patch_scores": torch.argmax(patch_logits_list[i], dim=1).cpu().numpy(),
-                    "weights":      weights_list[i],
+                    "weights": weights_list[i].detach().cpu().numpy(),
                 })
 
-    # ── Métricas ──────────────────────────────────────────────────────────────
-    total_seen = accelerator.reduce(total_seen, reduction="sum").item()
     epoch_loss = total_loss_sum / total_seen
 
-    y_true = torch.cat(all_y_true).numpy()
-    y_pred = torch.cat(all_y_pred).numpy()
-    y_prob = torch.cat(all_y_prob).numpy()
+    metrics = {}
+    conf_mat_df = pd.DataFrame()
+    heatmap_df = None
 
-    metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
-    
-    conf_mat = confusion_matrix(y_true, y_pred, labels=np.arange(model.num_classes))
-    conf_mat_df = pd.DataFrame(
-                conf_mat,
-                index=[f"true_{i}" for i in range(conf_mat.shape[0])],
-                columns=[f"pred_{i}" for i in range(conf_mat.shape[1])]
-            )
+    if accelerator.is_main_process:
+        y_true = torch.cat(all_y_true).numpy()
+        y_pred = torch.cat(all_y_pred).numpy()
+        y_prob = torch.cat(all_y_prob).numpy()
 
-    heatmap_df = pd.DataFrame(heatmap_list) if inference_heatmap else None
+        metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
+
+        conf_mat = confusion_matrix(
+            y_true, y_pred, labels=np.arange(num_classes)
+        )
+
+        conf_mat_df = pd.DataFrame(
+            conf_mat,
+            index=[f"true_{i}" for i in range(conf_mat.shape[0])],
+            columns=[f"pred_{i}" for i in range(conf_mat.shape[1])],
+        )
+
+    # Gather heatmaps al final
+    if inference_heatmap:
+        gathered_heatmaps = accelerator.gather_object(heatmap_list)
+
+        if accelerator.is_main_process:
+            # flatten lista de listas
+            flat_heatmaps = [item for sublist in gathered_heatmaps for item in sublist]
+            flat_heatmaps = sorted(flat_heatmaps, key=lambda x: x["wsi_id"])
+            heatmap_df = pd.DataFrame(flat_heatmaps)
 
     return metrics, conf_mat_df, epoch_loss, heatmap_df
