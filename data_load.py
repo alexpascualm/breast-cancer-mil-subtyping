@@ -53,7 +53,7 @@ def create_file_label_df(
     records = []
     wsis = [f for f in os.listdir(images_path) if f.endswith('.h5')]
     if small_dataset_for_test:
-        wsis = wsis[:30]
+        wsis = wsis[:50]
 
     for f in tqdm(wsis, desc="Processing breast WSIs", file=sys.stdout):
         slide_id = f.replace('.h5', '')

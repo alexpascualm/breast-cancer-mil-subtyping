@@ -8,7 +8,7 @@ import sys
 from tqdm import tqdm
 from sklearn.model_selection import StratifiedGroupKFold
 
-from models.patch_encoders.VIT_model import PatchClassifierVIT
+from models.patch_encoders import ENCODER_REGISTRY
 from utils.metrics_utils import compute_breast_metrics
 from sklearn.metrics import confusion_matrix
 
@@ -34,29 +34,69 @@ def set_multiple_seed(seed: int = 42, deterministic: bool = True):
     print(f"[INFO] Semilla fijada en {seed} (deterministic={deterministic})")
 
 
-def get_model(patch_encoder_type: str = "VIT", mil_aggregation_mode: str = "attentionMIL", unfreeze_backbone: bool = False, patch_embedding_mode: int = 0, num_classes: int = 2):
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIGURACIÓN FIJA POR ENCODER
+# ──────────────────────────────────────────────────────────────────────────────
+
+ENCODER_CONFIGS = {
+    "dino": {
+        "dino_model_name":      "vit_base_patch16_224.dino", # vit_large_patch14_dinov2
+        "patch_size":           224,
+        "patch_embedding_mode": 0,   # 0=CLS token, 1=mean pooling
+    },
+    # "uni": {
+    #     "uni_model_name": "MahmoodLab/UNI",
+    #     "patch_size":     224,
+    # },
+    # "conch": {
+    #     "conch_model_name": "MahmoodLab/conchv1_5",
+    #     "patch_size":       448,
+    # },
+    # "keep": {
+    #     "keep_model_name": "Astaxanthin/KEEP",
+    #     "patch_size":      224,
+    # },
+}
+
+def get_model(
+    patch_encoder_type: str = "dino", mil_aggregation_mode: str = "attentionMIL", unfreeze_backbone: bool = False, num_classes: int = 2, chunk_size: int = 512):
     """
     Instancia el encoder de parches seleccionado.
+    Los hiperparámetros específicos de cada modelo están hardcodeados
+    en ENCODER_CONFIGS (ver arriba en este mismo fichero).
 
     Args:
-        patch_encoder_type (str): 'VIT' (único soportado actualmente).
+        patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
         mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL'.
-        unfreeze_backbone (bool): descongelar backbone del encoder.
-        patch_embedding_mode (int): modo de embedding de las feats extraidas por parche (Depende de patch_encoder_type)
-        num_classes (int): número de clases de salida (del dataset).
+        unfreeze_backbone (bool) : descongelar los últimos bloques del backbone.
+        num_classes (int)        : número de clases de salida.
+        chunk_size (int)         : mini-batch interno de parches (control VRAM).
 
     Returns:
-        nn.Module
+        nn.Module (subclase de BasePatchEncoder)
+
+    Raises:
+        ValueError: si patch_encoder_type no está en ENCODER_REGISTRY.
     """
-    if patch_encoder_type == "VIT":
-        return PatchClassifierVIT(
-            num_classes=num_classes,
-            mil_aggregation_mode=mil_aggregation_mode,
-            patch_embedding_mode=patch_embedding_mode,
-            unfreeze_backbone=unfreeze_backbone,
+    key = patch_encoder_type.lower()
+
+    if key not in ENCODER_REGISTRY:
+        raise ValueError(
+            f"Encoder desconocido: '{patch_encoder_type}'. "
+            f"Opciones disponibles: {list(ENCODER_REGISTRY.keys())}"
         )
-    else:
-        raise ValueError(f"Encoder desconocido: '{patch_encoder_type}'. Opciones: 'VIT'")
+
+    EncoderClass   = ENCODER_REGISTRY[key]
+    encoder_kwargs = ENCODER_CONFIGS[key]
+
+    return EncoderClass(
+        num_classes=num_classes,
+        mil_aggregation_mode=mil_aggregation_mode,
+        unfreeze_backbone=unfreeze_backbone,
+        chunk_size=chunk_size,
+        **encoder_kwargs,
+    )
 
 
 def compute_class_weights(labels, num_classes):

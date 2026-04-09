@@ -43,7 +43,9 @@ def parse_args():
                         help="Entrenar solo con carcinomas ductales")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
-    parser.add_argument("--patch_model",                type=str,  default="VIT")
+    parser.add_argument("--patch_model", type=str, default="dino",
+        choices=["dino", "uni", "conch", "keep"],
+        help="Extractor de características: dino | uni | conch | keep")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode",       type=str,  default="attentionMIL",
                         choices=["max", "mean", "attentionMIL"])
@@ -164,7 +166,6 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         patch_encoder_type=args.patch_model,
         mil_aggregation_mode=args.mil_aggregation_mode,
         unfreeze_backbone=args.unfreeze_patch_model_backbone,
-        patch_embedding_mode=args.patch_embedding_mode,
         num_classes=num_classes,
     ).to(device)
 
