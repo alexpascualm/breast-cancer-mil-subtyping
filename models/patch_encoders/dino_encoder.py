@@ -7,13 +7,9 @@ Modelos habituales:
     "vit_base_patch16_224.dino"       - ViT-B/16  DINO
     "vit_large_patch14_dinov2.lvd142m" - ViT-L/14 DINOv2
 
-Uso:
-    from models.patch_encoders.dino_encoder import DINOEncoder
-    model = DINOEncoder(num_classes=4, dino_model_name="vit_base_patch16_224.dino")
 """
 
 import torch
-import torch.nn as nn
 import timm
 
 from models.patch_encoders.base_encoder import BasePatchEncoder
@@ -67,8 +63,9 @@ class DINOEncoder(BasePatchEncoder):
         for param in self.backbone.parameters():
             param.requires_grad = False
 
+        # Descongelar selectivamente si se solicita
         if self.unfreeze_backbone:
-            for param in self.backbone.blocks[9:].parameters():   # últimos 3 bloques
+            for param in self.backbone.blocks[-3:].parameters():   # últimos 3 bloques
                 param.requires_grad = True
             for param in self.backbone.norm.parameters():
                 param.requires_grad = True
