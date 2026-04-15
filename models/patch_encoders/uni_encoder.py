@@ -19,7 +19,7 @@ from models.patch_encoders.base_encoder import BasePatchEncoder
 
 class UNIEncoder(BasePatchEncoder):
     """
-    Encoder UNI de MahmoodLab + cabeza de clasificación + MIL.
+    Encoder UNI de MahmoodLab.
 
     Args:
         num_classes (int)           : número de clases de salida.
