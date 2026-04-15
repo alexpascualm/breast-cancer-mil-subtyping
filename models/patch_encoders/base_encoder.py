@@ -69,7 +69,7 @@ class BasePatchEncoder(ABC, nn.Module):
         Llama DESPUÉS de build_backbone() para construir el clasificador
         de parche y el módulo MIL.
         """
-        from models.mil import MILAggregator
+        from models.mil_aggregators import MILAggregator
 
         assert self.embed_dim is not None, (
             "embed_dim debe asignarse en build_backbone() antes de llamar a _build_head_and_mil()"

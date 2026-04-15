@@ -15,9 +15,9 @@ Para añadir una estrategia nueva:
 import torch
 import torch.nn as nn
 
-from models.mil.base_mil      import BaseMIL
-from models.mil.simple_mil    import MaxMIL, MeanMIL
-from models.mil.attention_mil import AttentionMIL
+from models.mil_aggregators.base_mil      import BaseMIL
+from models.mil_aggregators.simple_mil    import MaxMIL, MeanMIL
+from models.mil_aggregators.attention_mil import AttentionMIL
 
 # Registro: clave CLI → clase
 MIL_REGISTRY: dict[str, type[BaseMIL]] = {

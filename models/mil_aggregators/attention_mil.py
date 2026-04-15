@@ -9,7 +9,7 @@ un peso escalar por parche, que se usa para ponderar los logits.
 
 import torch
 import torch.nn as nn
-from models.mil.base_mil import BaseMIL
+from models.mil_aggregators.base_mil import BaseMIL
 
 
 class _GatedAttention(nn.Module):

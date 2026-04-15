@@ -7,7 +7,7 @@ Estrategias de agregación MIL sin parámetros aprendibles:
 """
 
 import torch
-from models.mil.base_mil import BaseMIL
+from models.mil_aggregators.base_mil import BaseMIL
 
 
 class MaxMIL(BaseMIL):
