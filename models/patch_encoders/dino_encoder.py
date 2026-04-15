@@ -17,7 +17,7 @@ from models.patch_encoders.base_encoder import BasePatchEncoder
 
 class DINOEncoder(BasePatchEncoder):
     """
-    Encoder ViT DINO/DINOv2 + cabeza de clasificación + MIL.
+    Encoder ViT DINO/DINOv2.
 
     Args:
         num_classes (int)           : número de clases de salida.

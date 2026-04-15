@@ -45,10 +45,10 @@ ENCODER_CONFIGS = {
         "patch_size":           224,
         "patch_embedding_mode": 0,   # 0=CLS token, 1=mean pooling
     },
-    # "uni": {
-    #     "uni_model_name": "MahmoodLab/UNI",
-    #     "patch_size":     224,
-    # },
+    "uni": {
+        "uni_model_name": "MahmoodLab/UNI",
+        "patch_size":     224,
+    },
     # "conch": {
     #     "conch_model_name": "MahmoodLab/conchv1_5",
     #     "patch_size":       448,

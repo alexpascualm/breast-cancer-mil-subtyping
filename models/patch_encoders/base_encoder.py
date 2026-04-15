@@ -16,8 +16,8 @@ class BasePatchEncoder(ABC, nn.Module):
     Interfaz común para todos los extractores de características de parches.
 
     Subclases obligadas a implementar:
-        - build_backbone()  → construye y congela/descongela el backbone
-        - extract_features(chunk_gpu) → Tensor (N, D)
+        - build_backbone()         → construye y congela/descongela el backbone
+        - extract_features(chunk)  → Tensor (N, embed_dim)
 
     La lógica de chunking, clasificación por parche y MIL se mantiene
     en esta clase para evitar duplicación entre encoders.
@@ -31,14 +31,14 @@ class BasePatchEncoder(ABC, nn.Module):
         unfreeze_backbone: bool,
     ):
         super().__init__()
-        self.num_classes = num_classes
+        self.num_classes          = num_classes
         self.mil_aggregation_mode = mil_aggregation_mode
-        self.chunk_size = chunk_size
-        self.unfreeze_backbone = unfreeze_backbone
+        self.chunk_size           = chunk_size
+        self.unfreeze_backbone    = unfreeze_backbone
 
-        # Estos atributos deben asignarse en build_backbone()
-        self.backbone: nn.Module = None
-        self.embed_dim: int = None
+        # Asignados en build_backbone()
+        self.backbone:  nn.Module = None
+        self.embed_dim: int       = None
 
     # ------------------------------------------------------------------
     # API que cada subclase DEBE implementar
@@ -68,9 +68,8 @@ class BasePatchEncoder(ABC, nn.Module):
         """
         Llama DESPUÉS de build_backbone() para construir el clasificador
         de parche y el módulo MIL.
-        Separado para que las subclases puedan extender sin romper la cadena.
         """
-        from models.MIL_model import MILArchitecture  # import local para evitar ciclos
+        from models.mil import MILAggregator
 
         assert self.embed_dim is not None, (
             "embed_dim debe asignarse en build_backbone() antes de llamar a _build_head_and_mil()"
@@ -83,10 +82,10 @@ class BasePatchEncoder(ABC, nn.Module):
             nn.Linear(512, self.num_classes),
         )
 
-        self.mil = MILArchitecture(
-            classes=list(range(self.num_classes)),
+        self.mil = MILAggregator(
             aggregation=self.mil_aggregation_mode,
-            L_value=self.embed_dim,
+            num_classes=self.num_classes,
+            embed_dim=self.embed_dim,
         )
 
     # ------------------------------------------------------------------
@@ -115,12 +114,12 @@ class BasePatchEncoder(ABC, nn.Module):
         all_embeddings, all_logits = [], []
         for chunk in chunks:
             chunk_gpu = chunk.to(device, non_blocking=True)
-            emb = self.extract_features(chunk_gpu)          # (N_chunk, D)
-            logits = self.classifier(emb)                   # (N_chunk, num_classes)
+            emb    = self.extract_features(chunk_gpu)   # (N_chunk, embed_dim)
+            logits = self.classifier(emb)               # (N_chunk, num_classes)
             all_embeddings.append(emb)
             all_logits.append(logits)
 
-        total_feats  = torch.cat(all_embeddings, dim=0)    # (N_total, D)
+        total_feats  = torch.cat(all_embeddings, dim=0)    # (N_total, embed_dim)
         total_logits = torch.cat(all_logits,     dim=0)    # (N_total, num_classes)
 
         wsi_logits, weights_list = self.mil(total_logits, total_feats, lengths)
