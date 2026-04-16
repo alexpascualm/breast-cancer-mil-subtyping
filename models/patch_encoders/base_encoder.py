@@ -1,18 +1,12 @@
 """
 models/patch_encoders/base_encoder.py
 --------------------------------------
-Clase base abstracta para todos los encoders de parches.
+Clase base abstracta para extractores de características de parches.
 
-Soporta dos familias de estrategias MIL:
+Responsabilidad única: dado un batch de parches (N, C, H, W),
+devolver embeddings (N, embed_dim).
 
-    INSTANCE-BASED (max, mean, attentionMIL):
-        El encoder aplica un clasificador por parche → obtiene patch_logits.
-        El MIL agrega esos logits en un logit de WSI.
-
-    BAG-BASED (transMIL):
-        El encoder solo extrae embeddings.
-        El MIL lleva su propio clasificador de WSI y agrega en el espacio
-        de features. El clasificador de parche NO se construye ni se usa.
+No sabe nada de MIL, clasificadores ni número de clases.
 """
 
 from abc import ABC, abstractmethod
@@ -25,30 +19,18 @@ class BasePatchEncoder(ABC, nn.Module):
     Interfaz común para todos los extractores de características de parches.
 
     Subclases obligadas a implementar:
-        - build_backbone()         → construye y congela/descongela el backbone
-        - extract_features(chunk)  → Tensor (N, embed_dim)
+        - build_backbone() → instancia self.backbone y asigna self.embed_dim
+        - extract_features(chunk_gpu) → Tensor (N, embed_dim)
 
-    La lógica de chunking, clasificación por parche y MIL se mantiene
-    en esta clase para evitar duplicación entre encoders.
+    El chunking para control de VRAM se gestiona aquí via encode().
     """
 
-    def __init__(
-        self,
-        num_classes: int,
-        mil_aggregation_mode: str,
-        chunk_size: int,
-        unfreeze_backbone: bool,
-    ):
+    def __init__(self, chunk_size: int, unfreeze_backbone: bool):
         super().__init__()
-        self.num_classes          = num_classes
-        self.mil_aggregation_mode = mil_aggregation_mode
-        self.chunk_size           = chunk_size
-        self.unfreeze_backbone    = unfreeze_backbone
-
-        self.backbone:    nn.Module      = None
-        self.embed_dim:   int            = None
-        self.classifier:  nn.Module      = None   # None si es bag-based
-        self.is_bag_based: bool          = False
+        self.chunk_size        = chunk_size
+        self.unfreeze_backbone = unfreeze_backbone
+        self.backbone:  nn.Module = None
+        self.embed_dim: int       = None
 
     # ------------------------------------------------------------------
     # API que cada subclase DEBE implementar
@@ -56,80 +38,41 @@ class BasePatchEncoder(ABC, nn.Module):
 
     @abstractmethod
     def build_backbone(self) -> None:
+        """
+        Instancia self.backbone y asigna self.embed_dim.
+        Aplica freeze / unfreeze según self.unfreeze_backbone.
+        """
         ...
 
     @abstractmethod
     def extract_features(self, chunk_gpu: torch.Tensor) -> torch.Tensor:
+        """
+        Recibe un mini-batch de parches (N, C, H, W) ya en GPU.
+        Devuelve embeddings (N, embed_dim).
+        """
         ...
 
     # ------------------------------------------------------------------
-    # Cabeza de clasificación y MIL (compartidos)
+    # Método público: extrae features de un tensor grande con chunking
     # ------------------------------------------------------------------
 
-    def _build_head_and_mil(self):
-        from models.mil_aggregators import MILAggregator, BAG_BASED_STRATEGIES
-
-        assert self.embed_dim is not None
-
-        self.is_bag_based = self.mil_aggregation_mode in BAG_BASED_STRATEGIES
-
-        if not self.is_bag_based:
-            # Clasificador de parche solo para estrategias instance-based
-            self.classifier = nn.Linear(self.embed_dim, self.num_classes)
-
-        self.mil = MILAggregator(
-            aggregation=self.mil_aggregation_mode,
-            num_classes=self.num_classes,
-            embed_dim=self.embed_dim,
-        )
-
-    # ------------------------------------------------------------------
-    # Forward unificado
-    # ------------------------------------------------------------------
-
-    def forward(self, inputs_list):
+    def encode(self, patches_cpu: torch.Tensor) -> torch.Tensor:
         """
+        Extrae embeddings de un tensor de parches con control de VRAM.
+
         Args:
-            inputs_list: list[Tensor], cada uno (N_patches, C, H, W) por WSI.
+            patches_cpu: Tensor (N, C, H, W) en CPU.
 
         Returns:
-            wsi_logits        : Tensor (B, num_classes)
-            patch_logits_list : list[B Tensors] (N_i, num_classes) o list[None] si bag-based
-            weights_list      : list[B Tensors] o list[None]
+            Tensor (N, embed_dim) en el dispositivo del modelo.
         """
         device = next(self.parameters()).device
-
-        lengths = [x.size(0) for x in inputs_list]
-        if sum(lengths) == 0:
-            raise RuntimeError("El batch no contiene parches.")
-
-        all_patches_cpu = torch.cat(inputs_list, dim=0)
-        chunks = torch.split(all_patches_cpu, self.chunk_size, dim=0)
-
-        all_embeddings = []
-        all_logits     = []
-
+        chunks = torch.split(patches_cpu, self.chunk_size, dim=0)
+        embeddings = []
         for chunk in chunks:
-            chunk_gpu = chunk.to(device, non_blocking=True)
-            emb = self.extract_features(chunk_gpu)          # (N_chunk, embed_dim)
-            all_embeddings.append(emb)
+            emb = self.extract_features(chunk.to(device, non_blocking=True))
+            embeddings.append(emb)
+        return torch.cat(embeddings, dim=0)
 
-            if not self.is_bag_based:
-                logits = self.classifier(emb)               # (N_chunk, num_classes)
-                all_logits.append(logits)
-
-        total_feats = torch.cat(all_embeddings, dim=0)      # (N_total, embed_dim)
-
-        if self.is_bag_based:
-            # Para bag-based: el MIL usa feats; patch_logits es un placeholder vacío
-            placeholder = torch.zeros(
-                total_feats.size(0), self.num_classes, device=device
-            )
-            wsi_logits, weights_list = self.mil(placeholder, total_feats, lengths)
-            patch_logits_list = [None] * len(lengths)
-        else:
-            total_logits = torch.cat(all_logits, dim=0)     # (N_total, num_classes)
-            wsi_logits, weights_list = self.mil(total_logits, total_feats, lengths)
-            patch_logits_list = list(torch.split(total_logits, lengths, dim=0))
-
-        return wsi_logits, patch_logits_list, weights_list
+    def forward(self, patches_cpu: torch.Tensor) -> torch.Tensor:
+        return self.encode(patches_cpu)

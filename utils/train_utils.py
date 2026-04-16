@@ -15,6 +15,7 @@ from tqdm import tqdm
 from sklearn.model_selection import StratifiedGroupKFold
 
 from models.patch_encoders import ENCODER_REGISTRY
+from models.wsi_classifier import WSIClassifier
 from utils.metrics_utils import compute_breast_metrics
 from sklearn.metrics import confusion_matrix
 
@@ -78,43 +79,48 @@ def get_model(
     unfreeze_backbone: bool = False,
     num_classes: int = 2,
     chunk_size: int = 512,
-):
+) -> WSIClassifier:
     """
-    Instancia el encoder de parches seleccionado.
-    Los hiperparámetros específicos de cada modelo están hardcodeados
-    en ENCODER_CONFIGS (ver arriba en este mismo fichero).
+    Construye y devuelve un WSIClassifier listo para entrenar.
+
+    1. Instancia el encoder de parches (solo extractor de features).
+    2. Instancia el WSIClassifier, que añade el clasificador y el MIL.
 
     Args:
         patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
         mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL' | 'transMIL'.
-        unfreeze_backbone (bool) : descongelar los últimos bloques del backbone.
+        unfreeze_backbone (bool) : descongelar últimos bloques del backbone.
         num_classes (int)        : número de clases de salida.
         chunk_size (int)         : mini-batch interno de parches (control VRAM).
 
     Returns:
-        nn.Module (subclase de BasePatchEncoder)
-
-    Raises:
-        ValueError: si patch_encoder_type no está en ENCODER_REGISTRY.
+        WSIClassifier
     """
     key = patch_encoder_type.lower()
-
     if key not in ENCODER_REGISTRY:
         raise ValueError(
             f"Encoder desconocido: '{patch_encoder_type}'. "
-            f"Opciones disponibles: {list(ENCODER_REGISTRY.keys())}"
+            f"Opciones: {list(ENCODER_REGISTRY.keys())}"
         )
 
+    # 1. Encoder: solo extractor de features, sin saber nada de MIL
     EncoderClass   = ENCODER_REGISTRY[key]
     encoder_kwargs = ENCODER_CONFIGS[key]
-
-    return EncoderClass(
-        num_classes=num_classes,
-        mil_aggregation_mode=mil_aggregation_mode,
-        unfreeze_backbone=unfreeze_backbone,
+    encoder = EncoderClass(
         chunk_size=chunk_size,
+        unfreeze_backbone=unfreeze_backbone,
         **encoder_kwargs,
     )
+
+    # 2. WSIClassifier: combina encoder + MIL + clasificador
+    model = WSIClassifier(
+        encoder=encoder,
+        mil_aggregation_mode=mil_aggregation_mode,
+        num_classes=num_classes,
+        chunk_size=chunk_size,
+    )
+
+    return model
 
 
 # ──────────────────────────────────────────────────────────────────────────────

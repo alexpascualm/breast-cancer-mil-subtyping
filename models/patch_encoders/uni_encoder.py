@@ -22,8 +22,6 @@ class UNIEncoder(BasePatchEncoder):
     Encoder UNI de MahmoodLab.
 
     Args:
-        num_classes (int)           : número de clases de salida.
-        mil_aggregation_mode (str)  : 'max' | 'mean' | 'attentionMIL'.
         chunk_size (int)            : mini-batches internos de parches.
         unfreeze_backbone (bool)    : descongelar los últimos 3 bloques.
         uni_model_name (str)        : repo HuggingFace ("MahmoodLab/UNI" o "MahmoodLab/UNI2-h").
@@ -32,24 +30,15 @@ class UNIEncoder(BasePatchEncoder):
 
     def __init__(
         self,
-        num_classes: int = 2,
-        mil_aggregation_mode: str = "attentionMIL",
         chunk_size: int = 128,
         unfreeze_backbone: bool = False,
         uni_model_name: str = "MahmoodLab/UNI",
         patch_size: int = 224,
     ):
-        super().__init__(
-            num_classes=num_classes,
-            mil_aggregation_mode=mil_aggregation_mode,
-            chunk_size=chunk_size,
-            unfreeze_backbone=unfreeze_backbone,
-        )
+        super().__init__(chunk_size=chunk_size, unfreeze_backbone=unfreeze_backbone)
         self.uni_model_name = uni_model_name
         self.patch_size = patch_size
-
         self.build_backbone()
-        self._build_head_and_mil()
 
     # ------------------------------------------------------------------
 
