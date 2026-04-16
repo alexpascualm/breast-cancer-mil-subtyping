@@ -56,7 +56,7 @@ class BasePatchEncoder(ABC, nn.Module):
     # Método público: extrae features de un tensor grande con chunking
     # ------------------------------------------------------------------
 
-    def encode(self, patches_cpu: torch.Tensor) -> torch.Tensor:
+    def forward(self, patches_cpu: torch.Tensor) -> torch.Tensor:
         """
         Extrae embeddings de un tensor de parches con control de VRAM.
 
@@ -74,5 +74,3 @@ class BasePatchEncoder(ABC, nn.Module):
             embeddings.append(emb)
         return torch.cat(embeddings, dim=0)
 
-    def forward(self, patches_cpu: torch.Tensor) -> torch.Tensor:
-        return self.encode(patches_cpu)
