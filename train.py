@@ -48,7 +48,7 @@ def parse_args():
         help="Extractor de características: dino | uni | conch | keep")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode",       type=str,  default="attentionMIL",
-                        choices=["max", "mean", "attentionMIL"])
+                        choices=["max", "mean", "attentionMIL", "transMIL"])
     parser.add_argument("--chunk_size",                 type=int,  default=512,
                         help="Tamaño de mini-batch interno de parches (control VRAM)")
     parser.add_argument("--patch_resize_size",                 type=int,  default=224,

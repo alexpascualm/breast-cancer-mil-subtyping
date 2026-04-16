@@ -1,3 +1,9 @@
+"""
+utils/train_utils.py
+--------------------
+Utilidades de entrenamiento: semillas, get_model, splits, run_epoch.
+"""
+
 import torch
 import torch.nn as nn
 import os
@@ -12,9 +18,37 @@ from models.patch_encoders import ENCODER_REGISTRY
 from utils.metrics_utils import compute_breast_metrics
 from sklearn.metrics import confusion_matrix
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIGURACIÓN FIJA POR ENCODER
+# Modifica aquí si quieres cambiar el modelo concreto de cada familia.
+# ──────────────────────────────────────────────────────────────────────────────
+
+ENCODER_CONFIGS = {
+    "dino": {
+        "dino_model_name":      "vit_base_patch16_224.dino",
+        "patch_size":           224,
+        "patch_embedding_mode": 0,   # 0=CLS token, 1=mean pooling
+    },
+    "uni": {
+        "uni_model_name": "MahmoodLab/UNI",
+        "patch_size":     224,
+    },
+    "conch": {
+        "conch_model_name": "MahmoodLab/conchv1_5",
+        "patch_size":       448,
+    },
+    "keep": {
+        "keep_model_name": "Astaxanthin/KEEP",
+        "patch_size":      224,
+    },
+}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SETUP
 # ──────────────────────────────────────────────────────────────────────────────
+
 def set_multiple_seed(seed: int = 42, deterministic: bool = True):
     """Fija semillas para reproducibilidad en Python, NumPy y PyTorch."""
     random.seed(seed)
@@ -34,33 +68,17 @@ def set_multiple_seed(seed: int = 42, deterministic: bool = True):
     print(f"[INFO] Semilla fijada en {seed} (deterministic={deterministic})")
 
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# CONFIGURACIÓN FIJA POR ENCODER
+# GET MODEL
 # ──────────────────────────────────────────────────────────────────────────────
-
-ENCODER_CONFIGS = {
-    "dino": {
-        "dino_model_name":      "vit_base_patch16_224.dino", # vit_large_patch14_dinov2
-        "patch_size":           224,
-        "patch_embedding_mode": 0,   # 0=CLS token, 1=mean pooling
-    },
-    "uni": {
-        "uni_model_name": "MahmoodLab/UNI",
-        "patch_size":     224,
-    },
-    # "conch": {
-    #     "conch_model_name": "MahmoodLab/conchv1_5",
-    #     "patch_size":       448,
-    # },
-    # "keep": {
-    #     "keep_model_name": "Astaxanthin/KEEP",
-    #     "patch_size":      224,
-    # },
-}
 
 def get_model(
-    patch_encoder_type: str = "dino", mil_aggregation_mode: str = "attentionMIL", unfreeze_backbone: bool = False, num_classes: int = 2, chunk_size: int = 512):
+    patch_encoder_type: str = "dino",
+    mil_aggregation_mode: str = "attentionMIL",
+    unfreeze_backbone: bool = False,
+    num_classes: int = 2,
+    chunk_size: int = 512,
+):
     """
     Instancia el encoder de parches seleccionado.
     Los hiperparámetros específicos de cada modelo están hardcodeados
@@ -68,7 +86,7 @@ def get_model(
 
     Args:
         patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
-        mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL'.
+        mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL' | 'transMIL'.
         unfreeze_backbone (bool) : descongelar los últimos bloques del backbone.
         num_classes (int)        : número de clases de salida.
         chunk_size (int)         : mini-batch interno de parches (control VRAM).
@@ -99,6 +117,10 @@ def get_model(
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# CLASS WEIGHTS
+# ──────────────────────────────────────────────────────────────────────────────
+
 def compute_class_weights(labels, num_classes):
     """
     Calcula pesos inversamente proporcionales a la frecuencia de clase.
@@ -116,6 +138,10 @@ def compute_class_weights(labels, num_classes):
     weights = weights / weights.sum() * num_classes
     return weights
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SPLITS
+# ──────────────────────────────────────────────────────────────────────────────
 
 def make_splits(df, label_col, seed):
     """
@@ -136,22 +162,16 @@ def make_splits(df, label_col, seed):
         subset = df.iloc[indices] if not isinstance(indices, pd.Index) else df.loc[indices]
         counts = subset[label_col].value_counts().sort_index()
         props  = subset[label_col].value_counts(normalize=True).sort_index()
-
-        lines = [f"\n  [{name}]  n={len(subset)}"]
+        lines  = [f"\n  [{name}]  n={len(subset)}"]
         for cls in counts.index:
             lines.append(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})")
-
         return "\n".join(lines)
 
     print("=" * 45)
     print(f"SPLITS — tarea: '{label_col}'  seed={seed}")
     print("=" * 45)
 
-    # Acumulador de texto
-    report_lines = []
-    report_lines.append("=" * 45)
-    report_lines.append(f"SPLITS — tarea: '{label_col}'  seed={seed}")
-    report_lines.append("=" * 45)
+    report_lines = ["=" * 45, f"SPLITS — tarea: '{label_col}'  seed={seed}", "=" * 45]
 
     total_str = get_proportions_str("TOTAL", df.index)
     print(total_str)
@@ -189,6 +209,7 @@ def make_splits(df, label_col, seed):
 # ──────────────────────────────────────────────────────────────────────────────
 # EPOCH RUNNER
 # ──────────────────────────────────────────────────────────────────────────────
+
 def run_epoch(
     model,
     dataloader,
@@ -287,13 +308,24 @@ def run_epoch(
         # Heatmap: SOLO acumulación local (sin gather aquí)
         if inference_heatmap:
             for i in range(len(inputs)):
+                # patch_logits_list[i] puede ser None en estrategias bag-based (transMIL)
+                patch_scores = (
+                    torch.argmax(patch_logits_list[i], dim=1).cpu().numpy()
+                    if patch_logits_list[i] is not None
+                    else None
+                )
+                patch_weights = (
+                    weights_list[i].detach().cpu().numpy()
+                    if weights_list[i] is not None
+                    else None
+                )
                 heatmap_list.append({
-                    "wsi_id":      wsi_ids[i],
-                    "pred_label":  preds[i].item(),
-                    "true_label":  labels[i].item(),
-                    "coords":      coords[i],
-                    "patch_scores": torch.argmax(patch_logits_list[i], dim=1).cpu().numpy(),
-                    "weights": weights_list[i].detach().cpu().numpy(),
+                    "wsi_id":       wsi_ids[i],
+                    "pred_label":   preds[i].item(),
+                    "true_label":   labels[i].item(),
+                    "coords":       coords[i],
+                    "patch_scores": patch_scores,
+                    "weights":      patch_weights,
                 })
 
     epoch_loss = total_loss_sum / total_seen

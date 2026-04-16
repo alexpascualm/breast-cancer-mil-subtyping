@@ -1,9 +1,18 @@
 """
-base_encoder.py
----------------
+models/patch_encoders/base_encoder.py
+--------------------------------------
 Clase base abstracta para todos los encoders de parches.
-Cualquier encoder nuevo debe heredar de BasePatchEncoder e implementar
-los métodos abstractos.
+
+Soporta dos familias de estrategias MIL:
+
+    INSTANCE-BASED (max, mean, attentionMIL):
+        El encoder aplica un clasificador por parche → obtiene patch_logits.
+        El MIL agrega esos logits en un logit de WSI.
+
+    BAG-BASED (transMIL):
+        El encoder solo extrae embeddings.
+        El MIL lleva su propio clasificador de WSI y agrega en el espacio
+        de features. El clasificador de parche NO se construye ni se usa.
 """
 
 from abc import ABC, abstractmethod
@@ -36,9 +45,10 @@ class BasePatchEncoder(ABC, nn.Module):
         self.chunk_size           = chunk_size
         self.unfreeze_backbone    = unfreeze_backbone
 
-        # Asignados en build_backbone()
-        self.backbone:  nn.Module = None
-        self.embed_dim: int       = None
+        self.backbone:    nn.Module      = None
+        self.embed_dim:   int            = None
+        self.classifier:  nn.Module      = None   # None si es bag-based
+        self.is_bag_based: bool          = False
 
     # ------------------------------------------------------------------
     # API que cada subclase DEBE implementar
@@ -46,18 +56,10 @@ class BasePatchEncoder(ABC, nn.Module):
 
     @abstractmethod
     def build_backbone(self) -> None:
-        """
-        Instancia self.backbone y asigna self.embed_dim.
-        Aplica freeze / unfreeze según self.unfreeze_backbone.
-        """
         ...
 
     @abstractmethod
     def extract_features(self, chunk_gpu: torch.Tensor) -> torch.Tensor:
-        """
-        Recibe un mini-batch de parches (N, C, H, W) ya en GPU.
-        Devuelve embeddings (N, embed_dim).
-        """
         ...
 
     # ------------------------------------------------------------------
@@ -65,22 +67,15 @@ class BasePatchEncoder(ABC, nn.Module):
     # ------------------------------------------------------------------
 
     def _build_head_and_mil(self):
-        """
-        Llama DESPUÉS de build_backbone() para construir el clasificador
-        de parche y el módulo MIL.
-        """
-        from models.mil_aggregators import MILAggregator
+        from models.mil_aggregators import MILAggregator, BAG_BASED_STRATEGIES
 
-        assert self.embed_dim is not None, (
-            "embed_dim debe asignarse en build_backbone() antes de llamar a _build_head_and_mil()"
-        )
+        assert self.embed_dim is not None
 
-        self.classifier = nn.Sequential(
-            nn.Linear(self.embed_dim, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(512, self.num_classes),
-        )
+        self.is_bag_based = self.mil_aggregation_mode in BAG_BASED_STRATEGIES
+
+        if not self.is_bag_based:
+            # Clasificador de parche solo para estrategias instance-based
+            self.classifier = nn.Linear(self.embed_dim, self.num_classes)
 
         self.mil = MILAggregator(
             aggregation=self.mil_aggregation_mode,
@@ -95,11 +90,11 @@ class BasePatchEncoder(ABC, nn.Module):
     def forward(self, inputs_list):
         """
         Args:
-            inputs_list: list[Tensor], cada uno (N_patches, C, H, W) para una WSI.
+            inputs_list: list[Tensor], cada uno (N_patches, C, H, W) por WSI.
 
         Returns:
             wsi_logits        : Tensor (B, num_classes)
-            patch_logits_list : list[B Tensors] de shape (N_patches_i, num_classes)
+            patch_logits_list : list[B Tensors] (N_i, num_classes) o list[None] si bag-based
             weights_list      : list[B Tensors] o list[None]
         """
         device = next(self.parameters()).device
@@ -111,18 +106,30 @@ class BasePatchEncoder(ABC, nn.Module):
         all_patches_cpu = torch.cat(inputs_list, dim=0)
         chunks = torch.split(all_patches_cpu, self.chunk_size, dim=0)
 
-        all_embeddings, all_logits = [], []
+        all_embeddings = []
+        all_logits     = []
+
         for chunk in chunks:
             chunk_gpu = chunk.to(device, non_blocking=True)
-            emb    = self.extract_features(chunk_gpu)   # (N_chunk, embed_dim)
-            logits = self.classifier(emb)               # (N_chunk, num_classes)
+            emb = self.extract_features(chunk_gpu)          # (N_chunk, embed_dim)
             all_embeddings.append(emb)
-            all_logits.append(logits)
 
-        total_feats  = torch.cat(all_embeddings, dim=0)    # (N_total, embed_dim)
-        total_logits = torch.cat(all_logits,     dim=0)    # (N_total, num_classes)
+            if not self.is_bag_based:
+                logits = self.classifier(emb)               # (N_chunk, num_classes)
+                all_logits.append(logits)
 
-        wsi_logits, weights_list = self.mil(total_logits, total_feats, lengths)
-        patch_logits_list = list(torch.split(total_logits, lengths, dim=0))
+        total_feats = torch.cat(all_embeddings, dim=0)      # (N_total, embed_dim)
+
+        if self.is_bag_based:
+            # Para bag-based: el MIL usa feats; patch_logits es un placeholder vacío
+            placeholder = torch.zeros(
+                total_feats.size(0), self.num_classes, device=device
+            )
+            wsi_logits, weights_list = self.mil(placeholder, total_feats, lengths)
+            patch_logits_list = [None] * len(lengths)
+        else:
+            total_logits = torch.cat(all_logits, dim=0)     # (N_total, num_classes)
+            wsi_logits, weights_list = self.mil(total_logits, total_feats, lengths)
+            patch_logits_list = list(torch.split(total_logits, lengths, dim=0))
 
         return wsi_logits, patch_logits_list, weights_list

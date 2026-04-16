@@ -2,3 +2,4 @@ h5py
 openpyxl
 accelerate
 timm
+nystrom-attention
