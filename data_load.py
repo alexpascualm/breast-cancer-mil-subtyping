@@ -150,8 +150,8 @@ class BreastWSI_Dataset(Dataset):
         self.inference_heatmap = bool(inference_heatmap)
 
         self.transform = T.Compose([
+            T.Resize((patch_resize_size, patch_resize_size), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
             T.ToTensor(),
-            T.Resize((patch_resize_size, patch_resize_size), antialias=True),
             T.Normalize(mean=[0.485, 0.456, 0.406],
                         std=[0.229, 0.224, 0.225]),
         ])
