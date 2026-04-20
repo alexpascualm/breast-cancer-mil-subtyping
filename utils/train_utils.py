@@ -88,7 +88,7 @@ def get_model(
 
     Args:
         patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
-        mil_aggregation_mode (str): 'max' | 'mean' | 'attentionMIL' | 'transMIL'.
+        mil_aggregation_mode (str): 'max' | 'mean' | 'abMIL-instance-level' | 'abMIL-bag-level' | 'transMIL'.
         unfreeze_backbone (bool) : descongelar últimos bloques del backbone.
         num_classes (int)        : número de clases de salida.
         chunk_size (int)         : mini-batch interno de parches (control VRAM).

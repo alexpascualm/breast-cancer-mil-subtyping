@@ -47,8 +47,8 @@ def parse_args():
         choices=["dino", "uni", "conch", "keep"],
         help="Extractor de características: dino | uni | conch | keep")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
-    parser.add_argument("--mil_aggregation_mode",       type=str,  default="attentionMIL",
-                        choices=["max", "mean", "attentionMIL", "transMIL"])
+    parser.add_argument("--mil_aggregation_mode",       type=str,  default="abMIL-bag-level",
+                        choices=["max", "mean", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
     parser.add_argument("--chunk_size",                 type=int,  default=512,
                         help="Tamaño de mini-batch interno de parches (control VRAM)")
     parser.add_argument("--patch_resize_size",                 type=int,  default=224,
@@ -348,11 +348,11 @@ if __name__ == "__main__":
     else:
         print("Lanzando grid de experimentos ...", flush=True)
         experiments = [
-            dict(task="er"),
-            dict(task="pr"),
-            dict(task="her2"),
-            dict(task="ki67"),
-            dict(task="molecular_subtype"),
+            # dict(task="er", mil_aggregation_mode="transMIL", patch_model="uni"),
+            # dict(task="pr", mil_aggregation_mode= "transMIL", patch_model="dino"),
+            dict(task="her2", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
+            dict(task="ki67", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
+            # dict(task="molecular_subtype"),
         ]
         for exp in experiments:
             exp_args = copy.deepcopy(args)

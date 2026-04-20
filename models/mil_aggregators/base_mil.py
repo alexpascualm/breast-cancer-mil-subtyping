@@ -1,5 +1,5 @@
 """
-models/mil/base_mil.py
+models/mil_aggregators/base_mil.py
 ----------------------
 Clase base abstracta para todas las estrategias de agregación MIL.
 

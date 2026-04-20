@@ -31,7 +31,7 @@ except ImportError as e:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Bloques internos (igual que el paper, sin cambios)
+# Bloques internos de TransMIL (adaptados del código original de Shao et al.)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class _TransLayer(nn.Module):

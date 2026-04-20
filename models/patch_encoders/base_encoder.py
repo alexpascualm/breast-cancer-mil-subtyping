@@ -6,7 +6,6 @@ Clase base abstracta para extractores de características de parches.
 Responsabilidad única: dado un batch de parches (N, C, H, W),
 devolver embeddings (N, embed_dim).
 
-No sabe nada de MIL, clasificadores ni número de clases.
 """
 
 from abc import ABC, abstractmethod
