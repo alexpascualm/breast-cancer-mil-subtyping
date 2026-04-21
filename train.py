@@ -49,21 +49,13 @@ def parse_args():
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode",       type=str,  default="abMIL-bag-level",
                         choices=["max", "mean", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
-    parser.add_argument("--chunk_size",                 type=int,  default=512,
-                        help="Tamaño de mini-batch interno de parches (control VRAM)")
     parser.add_argument("--patch_resize_size",                 type=int,  default=224,
                         help="Dimensiones de reescalado de los parches")
-    parser.add_argument("--patch_embedding_mode",                 type=int,  default=0,
-                        help=(
-                            "Modo de obtención del embedding de cada patch a partir de la salida del ViT. "
-                            "0: usar el token CLS (representación global aprendida). "
-                            "1: mean pooling de los tokens espaciales (promedio de subpatches, sin CLS)."
-                        ))
-
+    
     # ── Entrenamiento ─────────────────────────────────────────────────────────
     parser.add_argument("--batch_size",    type=int,   default=8)
     parser.add_argument("--epochs",        type=int,   default=100)
-    parser.add_argument("--patience",      type=int,   default=20)
+    parser.add_argument("--patience",      type=int,   default=30)
     parser.add_argument("--optimizer",     type=str,   default="AdamW",
                         choices=["SGD", "AdamW"])
     parser.add_argument("--momentum",      type=float, default=0.9,
@@ -348,36 +340,75 @@ if __name__ == "__main__":
     else:
         print("Lanzando grid de experimentos ...", flush=True)
         experiments = [
-            dict(task="er", mil_aggregation_mode="transMIL", patch_model="uni"),
-            dict(task="er", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
-            dict(task="er", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
-            dict(task="er", mil_aggregation_mode= "transMIL", patch_model="dino"),
-            dict(task="er", mil_aggregation_mode="abMIL-instance-level", patch_model="dino"),
-            dict(task="er", mil_aggregation_mode= "abMIL-bag-level", patch_model="dino"),
-            dict(task="ki67", mil_aggregation_mode="transMIL", patch_model="uni"),
-            dict(task="ki67", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
-            dict(task="ki67", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
-            dict(task="ki67", mil_aggregation_mode= "transMIL", patch_model="dino"),
-            dict(task="ki67", mil_aggregation_mode="abMIL-instance-level", patch_model="dino"),
-            dict(task="ki67", mil_aggregation_mode= "abMIL-bag-level", patch_model="dino"),
-            dict(task="her2", mil_aggregation_mode="transMIL", patch_model="uni"),
-            dict(task="her2", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
-            dict(task="her2", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
-            dict(task="her2", mil_aggregation_mode= "transMIL", patch_model="dino"),
-            dict(task="her2", mil_aggregation_mode="abMIL-instance-level", patch_model="dino"),
-            dict(task="her2", mil_aggregation_mode= "abMIL-bag-level", patch_model="dino"),
-            dict(task="pr", mil_aggregation_mode="transMIL", patch_model="uni"),
-            dict(task="pr", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
-            dict(task="pr", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
-            dict(task="pr", mil_aggregation_mode= "transMIL", patch_model="dino"),
-            dict(task="pr", mil_aggregation_mode="abMIL-instance-level", patch_model="dino"),
-            dict(task="pr", mil_aggregation_mode= "abMIL-bag-level", patch_model="dino"),
-            dict(task="molecular_subtype", mil_aggregation_mode="transMIL", patch_model="uni"),
-            dict(task="molecular_subtype", mil_aggregation_mode="abMIL-instance-level", patch_model="uni"),
-            dict(task="molecular_subtype", mil_aggregation_mode= "abMIL-bag-level", patch_model="uni"),
-            dict(task="molecular_subtype", mil_aggregation_mode= "transMIL", patch_model="dino"),
-            dict(task="molecular_subtype", mil_aggregation_mode="abMIL-instance-level", patch_model="dino"),
-            dict(task="molecular_subtype", mil_aggregation_mode= "abMIL-bag-level", patch_model="dino"),
+            # ── ER ────────────────────────────────────────────────────────
+            dict(task="er", patch_model="uni",  mil_aggregation_mode="transMIL",
+                 learning_rate=5e-6, weight_decay=5e-5),
+            dict(task="er", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="er", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="er", patch_model="dino", mil_aggregation_mode="transMIL",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="er", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
+            dict(task="er", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
+
+            # ── Ki67 ──────────────────────────────────────────────────────
+            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="transMIL",
+                 learning_rate=5e-6, weight_decay=5e-5),
+            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="ki67", patch_model="dino", mil_aggregation_mode="transMIL",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="ki67", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
+            dict(task="ki67", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
+
+            # ── HER2 ──────────────────────────────────────────────────────
+            dict(task="her2", patch_model="uni",  mil_aggregation_mode="transMIL",
+                 learning_rate=1e-5, weight_decay=1e-4),
+            dict(task="her2", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="her2", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="her2", patch_model="dino", mil_aggregation_mode="transMIL",
+                 learning_rate=3e-5, weight_decay=1e-4),
+            dict(task="her2", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=5e-5, weight_decay=5e-5),
+            dict(task="her2", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=5e-5, weight_decay=5e-5),
+
+            # ── PR ────────────────────────────────────────────────────────
+            dict(task="pr", patch_model="uni",  mil_aggregation_mode="transMIL",
+                 learning_rate=1e-5, weight_decay=1e-4),
+            dict(task="pr", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="pr", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="pr", patch_model="dino", mil_aggregation_mode="transMIL",
+                 learning_rate=3e-5, weight_decay=1e-4),
+            dict(task="pr", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=5e-5, weight_decay=5e-5),
+            dict(task="pr", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=5e-5, weight_decay=5e-5),
+
+            # ── Molecular subtype (4 clases) ───────────────────────────────
+            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="transMIL",
+                 learning_rate=6e-6, weight_decay=5e-5),
+            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=1e-5, weight_decay=3e-5),
+            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="transMIL",
+                 learning_rate=2e-5, weight_decay=5e-5),
+            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
+            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
+                 learning_rate=3e-5, weight_decay=3e-5),
         ]
         for exp in experiments:
             exp_args = copy.deepcopy(args)

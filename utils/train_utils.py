@@ -29,7 +29,6 @@ ENCODER_CONFIGS = {
     "dino": {
         "dino_model_name":      "vit_base_patch16_224.dino",
         "patch_size":           224,
-        "patch_embedding_mode": 0,   # 0=CLS token, 1=mean pooling
     },
     "uni": {
         "uni_model_name": "MahmoodLab/UNI",
