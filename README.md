@@ -22,7 +22,11 @@ apt-get install -y libopenslide-dev
 pip install torch
 pip install torchvision
 
-python patching/extract_patches.py --source /data/BCNB/TIF/ --save_dir /data/BCNB/patches/ --seg --patch --stitch --patch_size 1024 --step_size 1024 --custom_downsample 1
+python patching/extract_patches.py --source /data/BCNB/TIF/ --save_dir /data/BCNB/patches/ --seg --patch --patch_size 1024 --step_size 1024 --custom_downsample 1
+
+# Extracción de embeddings con Encoders
+
+python extract_embeddings.py --patch_model uni  --output_folder /data/BCNB/processed_1024/embeddings
 
 # Crear el contenedor para los experimentos de mama
 

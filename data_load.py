@@ -98,9 +98,9 @@ def create_file_label_df(
 # ──────────────────────────────────────────────────────────────────────────────
 # DATASET
 # ──────────────────────────────────────────────────────────────────────────────
-class BreastWSI_Dataset(Dataset):
+class Patches_WSI_Dataset(Dataset):
     """
-    Dataset for breast WSI patches stored in HDF5 files.
+    Dataset for WSI patches stored in HDF5 files.
 
     Supported tasks
     ---------------
@@ -219,6 +219,120 @@ class BreastWSI_Dataset(Dataset):
         return 2                                # binary: 0 / 1
 
 
+class Embeddings_WSI_Dataset(Dataset):
+    """
+    Dataset que lee embeddings precomputados desde ficheros .h5,
+    evitando usar el encoder en cada época.
+
+    Estructura esperada del .h5:
+        embeddings : (N, embed_dim)  float32
+        coords     : (N, 2)          int      [opcional]
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        Output de create_file_label_df(), con columna 'features'
+        apuntando a los .h5 ORIGINALES de parches.
+    indices : list[int]
+    embeddings_folder : str
+        Carpeta donde están los .h5 de embeddings precomputados.
+        Se asume que el stem del fichero coincide con el de 'features'.
+    task : str
+    load_on_demand : bool
+        False → carga todos los embeddings en RAM al iniciar.
+        True  → lee el .h5 en cada __getitem__.
+        Con embeddings (floats) el tamaño en RAM es mucho menor
+        que con imágenes, así que load_on_demand=False es viable
+        incluso para datasets grandes.
+    inference_heatmap : bool
+    """
+
+    SUPPORTED_TASKS = ('molecular_subtype', 'er', 'pr', 'her2', 'ki67')
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        indices,
+        embeddings_folder: str,
+        task: str = 'molecular_subtype',
+        load_on_demand: bool = False,
+        inference_heatmap: bool = False,
+    ):
+        if task not in self.SUPPORTED_TASKS:
+            raise ValueError(f"task must be one of {self.SUPPORTED_TASKS}")
+
+        self.dataframe         = dataframe
+        self.indices           = list(indices)
+        self.embeddings_folder = embeddings_folder
+        self.task              = task
+        self.load_on_demand    = load_on_demand
+        self.inference_heatmap = inference_heatmap
+
+        # Construir rutas a los .h5 de embeddings
+        self.emb_paths = []
+        for i in self.indices:
+            src = dataframe.iloc[i]["features"]
+            stem = os.path.splitext(os.path.basename(src))[0]
+            self.emb_paths.append(
+                os.path.join(embeddings_folder, f"{stem}.h5")
+            )
+
+        # Validar que existen antes de empezar
+        missing = [p for p in self.emb_paths if not os.path.exists(p)]
+        if missing:
+            raise FileNotFoundError(
+                f"{len(missing)} ficheros de embeddings no encontrados. "
+                f"Primeros: {missing[:3]}"
+            )
+
+        # Labels
+        self.labels = [
+            torch.tensor(int(dataframe.iloc[i][task]), dtype=torch.long)
+            for i in self.indices
+        ]
+
+        # Pre-carga opcional
+        self.embeddings_cache = []
+        self.coords_cache     = []
+
+        if not self.load_on_demand:
+            print(f"Pre-cargando embeddings en RAM...", flush=True)
+            for path in tqdm(self.emb_paths, file=sys.stdout):
+                emb, coords = self._read_h5(path)
+                self.embeddings_cache.append(emb)
+                self.coords_cache.append(coords)
+
+    def _read_h5(self, path):
+        with h5py.File(path, "r") as h5:
+            emb    = torch.from_numpy(h5["embeddings"][:])   # (N, D)
+            coords = h5["coords"][:] if "coords" in h5 else None
+        return emb, coords
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        label = self.labels[idx]
+        wsi_id = self.emb_paths[idx]
+
+        if not self.load_on_demand:
+            emb    = self.embeddings_cache[idx]
+            coords = self.coords_cache[idx] if self.inference_heatmap else None
+        else:
+            emb, coords = self._read_h5(self.emb_paths[idx])
+            if not self.inference_heatmap:
+                coords = None
+
+        if self.inference_heatmap:
+            return emb, label, wsi_id, coords
+        return emb, label, wsi_id
+
+    @property
+    def num_classes(self) -> int:
+        if self.task == 'molecular_subtype':
+            return len(MOLECULAR_SUBTYPE_MAP)
+        return 2
+        
 # ──────────────────────────────────────────────────────────────────────────────
 # COLLATE
 # ──────────────────────────────────────────────────────────────────────────────

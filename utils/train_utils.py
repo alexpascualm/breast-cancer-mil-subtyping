@@ -29,19 +29,23 @@ ENCODER_CONFIGS = {
     "dino": {
         "dino_model_name":      "vit_base_patch16_224.dino",
         "patch_size":           224,
+        "embed_dim":            768,    # ViT-B/16
     },
     "uni": {
         "uni_model_name": "MahmoodLab/UNI",
         "patch_size":     224,
+        "embed_dim":      1024,         # ViT-L/16
     },
-    "conch": {
-        "conch_model_name": "MahmoodLab/conchv1_5",
-        "patch_size":       448,
-    },
-    "keep": {
-        "keep_model_name": "Astaxanthin/KEEP",
-        "patch_size":      224,
-    },
+    # "conch": {
+    #     "conch_model_name": "MahmoodLab/conchv1_5",
+    #     "patch_size":       448,
+    #     "embed_dim":        768,
+    # },
+    # "keep": {
+    #     "keep_model_name": "Astaxanthin/KEEP",
+    #     "patch_size":      224,
+    #     "embed_dim":       1024,   
+    # },
 }
 
 
@@ -78,19 +82,30 @@ def get_model(
     unfreeze_backbone: bool = False,
     num_classes: int = 2,
     chunk_size: int = 512,
+    skip_encoder: bool = False,
 ) -> WSIClassifier:
     """
     Construye y devuelve un WSIClassifier listo para entrenar.
 
-    1. Instancia el encoder de parches (solo extractor de features).
-    2. Instancia el WSIClassifier, que añade el clasificador y el MIL.
+    Dos modos de operación:
+
+    skip_encoder=False (modo normal):
+        1. Instancia el encoder de parches desde ENCODER_REGISTRY.
+        2. Instancia WSIClassifier combinando encoder + MIL + clasificador.
+        El embed_dim se lee de ENCODER_CONFIGS y se extrae antes de pasarlo al encoder para evitar kwargs inesperados.
+
+    skip_encoder=True (modo embeddings precomputados):
+        Solo instancia el MIL + clasificador, sin cargar ningún backbone.
+        El embed_dim se lee directamente de ENCODER_CONFIGS.
+        Requiere usar WSIClassifier.forward_from_embeddings() en lugar de forward().
 
     Args:
         patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
         mil_aggregation_mode (str): 'max' | 'mean' | 'abMIL-instance-level' | 'abMIL-bag-level' | 'transMIL'.
-        unfreeze_backbone (bool) : descongelar últimos bloques del backbone.
+        unfreeze_backbone (bool) : descongelar últimos bloques del backbone (ignorado si skip_encoder=True).
         num_classes (int)        : número de clases de salida.
-        chunk_size (int)         : mini-batch interno de parches (control VRAM).
+        chunk_size (int)         : mini-batch interno de parches (ignorado si skip_encoder=True).
+        skip_encoder (bool)      : si True, no instancia el encoder — usar con embeddings precomputados.
 
     Returns:
         WSIClassifier
@@ -102,22 +117,29 @@ def get_model(
             f"Opciones: {list(ENCODER_REGISTRY.keys())}"
         )
 
-    # 1. Encoder: solo extractor de features, sin saber nada de MIL
-    EncoderClass   = ENCODER_REGISTRY[key]
-    encoder_kwargs = ENCODER_CONFIGS[key]
-    encoder = EncoderClass(
-        chunk_size=chunk_size,
-        unfreeze_backbone=unfreeze_backbone,
-        **encoder_kwargs,
-    )
+    if skip_encoder:
+        # Solo MIL + clasificador, sin backbone. Útil cuando los embeddings ya están precomputados en disco y no se quiere cargar el ViT en memoria.
+        model = WSIClassifier(
+            encoder=None,
+            mil_aggregation_mode=mil_aggregation_mode,
+            num_classes=num_classes,
+            embed_dim=ENCODER_CONFIGS[key]["embed_dim"],
+        )
+    else:
+        encoder_kwargs = {k: v for k, v in ENCODER_CONFIGS[key].items() if k != "embed_dim"} # embed_dim se descarta porque el encoder lo asigna internamente tras build_backbone() y no se le pasa como argumento directo.
 
-    # 2. WSIClassifier: combina encoder + MIL + clasificador
-    model = WSIClassifier(
-        encoder=encoder,
-        mil_aggregation_mode=mil_aggregation_mode,
-        num_classes=num_classes,
-        chunk_size=chunk_size,
-    )
+        encoder = ENCODER_REGISTRY[key](
+            chunk_size=chunk_size,
+            unfreeze_backbone=unfreeze_backbone,
+            **encoder_kwargs,
+        )
+
+        model = WSIClassifier(
+            encoder=encoder,
+            mil_aggregation_mode=mil_aggregation_mode,
+            num_classes=num_classes,
+            chunk_size=chunk_size,
+        )
 
     return model
 
@@ -225,6 +247,7 @@ def run_epoch(
     task: str = "molecular_subtype",
     mode: str = "train",
     inference_heatmap: bool = False,
+    precomputed_embeddings: bool = False
 ):
     """
     Ejecuta una época completa (train / val / test).
@@ -239,6 +262,7 @@ def run_epoch(
         task (str): tarea activa — determina cómo interpretar etiquetas y métricas.
         mode (str): 'train' | 'val' | 'test'.
         inference_heatmap (bool): si True, acumula info para generar heatmaps.
+        precomputed_embeddings (bool): si True, el dataloader ya devuelve embeddings en vez de imágenes y se usa model.forward_from_embeddings().
 
     Returns:
         metrics (dict): métricas de la época.
@@ -269,15 +293,21 @@ def run_epoch(
         disable=not accelerator.is_main_process,
         file=sys.stdout,
     ):
-
         if inference_heatmap:
             inputs, labels, wsi_ids, coords = batch_info
         else:
             inputs, labels, wsi_ids, _ = batch_info
 
         labels = labels.to(device)
+        
+        if precomputed_embeddings:
+            # inputs es lista de tensores de embeddings — se mueven a device y se procesan con model.forward_from_embeddings()
+            inputs_device = [emb.to(device, non_blocking=True) for emb in inputs]
+            wsi_logits, patch_logits_list, weights_list = model.forward_from_embeddings(inputs_device)
+        else:
+            # inputs es lista de tensores de imágenes — se procesan con model.forward() y se mueven a device dentro del encoder.forward
+            wsi_logits, patch_logits_list, weights_list = model(inputs)
 
-        wsi_logits, patch_logits_list, weights_list = model(inputs)
         loss = criterion(wsi_logits, labels)
 
         if mode == "train":

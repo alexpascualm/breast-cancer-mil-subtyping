@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from accelerate import Accelerator
 import gc
 
-from data_load import BreastWSI_Dataset, create_file_label_df, collate_fn
+from data_load import Patches_WSI_Dataset, Embeddings_WSI_Dataset, create_file_label_df, collate_fn
 from utils.train_utils import set_multiple_seed, get_model, compute_class_weights, make_splits, run_epoch
 from utils.metrics_utils import log_epoch_metrics, save_metrics_to_csv
 from config import bcnb_images_folder_path, bcnb_labels_df_path, results_folder_path
@@ -43,7 +43,7 @@ def parse_args():
                         help="Entrenar solo con carcinomas ductales")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
-    parser.add_argument("--patch_model", type=str, default="dino",
+    parser.add_argument("--patch_model", type=str, default="uni",
         choices=["dino", "uni", "conch", "keep"],
         help="Extractor de características: dino | uni | conch | keep")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
@@ -51,6 +51,9 @@ def parse_args():
                         choices=["max", "mean", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
     parser.add_argument("--patch_resize_size",                 type=int,  default=224,
                         help="Dimensiones de reescalado de los parches")
+    parser.add_argument("--precomputed_embeddings_folder", type=str, default=None,
+                    help="Si se especifica, usa embeddings precomputados en lugar "
+                         "de procesar imágenes con el encoder en cada época.")
     
     # ── Entrenamiento ─────────────────────────────────────────────────────────
     parser.add_argument("--batch_size",    type=int,   default=8)
@@ -126,12 +129,23 @@ def main(args=None):
     # ── Datasets ──────────────────────────────────────────────────────────────
     t0 = time.time()
     print("Cargando datasets ...", flush=True)
-    ds_train = BreastWSI_Dataset(df, train_idx, task=args.task, patch_resize_size = args.patch_resize_size,
-                                 load_on_demand=args.load_on_demand)
-    ds_val   = BreastWSI_Dataset(df, val_idx,   task=args.task,  patch_resize_size = args.patch_resize_size,
-                                 load_on_demand=args.load_on_demand)
-    ds_test  = BreastWSI_Dataset(df, test_idx,  task=args.task,  patch_resize_size = args.patch_resize_size,
-                                 load_on_demand=args.load_on_demand)
+    if args.precomputed_embeddings_folder:
+        ds_train = Embeddings_WSI_Dataset(df, train_idx, task=args.task,
+                                        embeddings_folder=args.precomputed_embeddings_folder,
+                                        load_on_demand=args.load_on_demand)
+        ds_val   = Embeddings_WSI_Dataset(df, val_idx,   task=args.task,
+                                        embeddings_folder=args.precomputed_embeddings_folder,
+                                        load_on_demand=args.load_on_demand)
+        ds_test  = Embeddings_WSI_Dataset(df, test_idx,  task=args.task,
+                                        embeddings_folder=args.precomputed_embeddings_folder,
+                                        load_on_demand=args.load_on_demand)
+    else:
+        ds_train = Patches_WSI_Dataset(df, train_idx, task=args.task, patch_resize_size = args.patch_resize_size,
+                                    load_on_demand=args.load_on_demand)
+        ds_val   = Patches_WSI_Dataset(df, val_idx,   task=args.task,  patch_resize_size = args.patch_resize_size,
+                                    load_on_demand=args.load_on_demand)
+        ds_test  = Patches_WSI_Dataset(df, test_idx,  task=args.task,  patch_resize_size = args.patch_resize_size,
+                                    load_on_demand=args.load_on_demand)
     print(f"Tiempo de carga: {time.time() - t0:.1f}s  "
           f"(train={len(ds_train)}, val={len(ds_val)}, test={len(ds_test)})", flush=True)
 
@@ -159,6 +173,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         mil_aggregation_mode=args.mil_aggregation_mode,
         unfreeze_backbone=args.unfreeze_patch_model_backbone,
         num_classes=num_classes,
+        skip_encoder=args.precomputed_embeddings_folder is not None,
     ).to(device)
 
     # ── Carpeta de resultados ─────────────────────────────────────────────────
@@ -233,6 +248,8 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     best_val_loss = float("inf")
     no_improve    = 0
 
+    precomputed = args.precomputed_embeddings_folder is not None
+
     for epoch in range(args.epochs):
         t_ep = time.time()
         if accelerator.is_main_process:
@@ -242,6 +259,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         train_metrics, train_conf_mat, train_loss, _ = run_epoch(
             model, train_loader, device, accelerator,
             criterion, optimizer, task=args.task, mode="train",
+            precomputed_embeddings=precomputed,
         )
         if accelerator.is_main_process:
             log_epoch_metrics(epoch, "Train", args.task, train_metrics, train_loss, log_path)
@@ -259,6 +277,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         val_metrics, val_conf_mat, val_loss, _ = run_epoch(
             model, val_loader, device, accelerator,
             criterion, None, task=args.task, mode="val",
+            precomputed_embeddings=precomputed,
         )
         if accelerator.is_main_process:
             log_epoch_metrics(epoch, "Val", args.task, val_metrics, val_loss, log_path)
@@ -312,6 +331,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     test_metrics, test_conf_mat, test_loss, _ = run_epoch(
         model, test_loader, device, accelerator,
         criterion, None, task=args.task, mode="test",
+        precomputed_embeddings=precomputed,
     )
     if accelerator.is_main_process:
         log_epoch_metrics("Test", "Test", args.task, test_metrics, test_loss, log_path)
