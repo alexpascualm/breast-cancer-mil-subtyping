@@ -1,6 +1,8 @@
 import argparse
 import os
 import copy
+import itertools
+import shutil
 from datetime import datetime
 import time
 from huggingface_hub import login
@@ -73,6 +75,8 @@ def parse_args():
     parser.add_argument("--small_dataset_for_test", action="store_true")
     parser.add_argument("--seed",                   type=int, default=98)
     parser.add_argument("--experiment_nickname",    type=str, default="")
+    parser.add_argument("--save_models",            action="store_true",
+                        help="Si se activa, guarda checkpoints best_model y last_model en disco")
 
     parser.add_argument("--resume_training",        action="store_true")
     parser.add_argument("--pretrained_model_path",  type=str, default=None)
@@ -129,23 +133,33 @@ def main(args=None):
     # ── Datasets ──────────────────────────────────────────────────────────────
     t0 = time.time()
     print("Cargando datasets ...", flush=True)
-    if args.precomputed_embeddings_folder:
+  
+    emb_folder = (
+    os.path.join(args.precomputed_embeddings_folder, args.patch_model)
+    if args.precomputed_embeddings_folder else None
+    )
+
+    if emb_folder:
         ds_train = Embeddings_WSI_Dataset(df, train_idx, task=args.task,
-                                        embeddings_folder=args.precomputed_embeddings_folder,
-                                        load_on_demand=args.load_on_demand)
+                                          embeddings_folder=emb_folder,
+                                          load_on_demand=args.load_on_demand)
         ds_val   = Embeddings_WSI_Dataset(df, val_idx,   task=args.task,
-                                        embeddings_folder=args.precomputed_embeddings_folder,
-                                        load_on_demand=args.load_on_demand)
+                                          embeddings_folder=emb_folder,
+                                          load_on_demand=args.load_on_demand)
         ds_test  = Embeddings_WSI_Dataset(df, test_idx,  task=args.task,
-                                        embeddings_folder=args.precomputed_embeddings_folder,
-                                        load_on_demand=args.load_on_demand)
+                                          embeddings_folder=emb_folder,
+                                          load_on_demand=args.load_on_demand)
     else:
-        ds_train = Patches_WSI_Dataset(df, train_idx, task=args.task, patch_resize_size = args.patch_resize_size,
-                                    load_on_demand=args.load_on_demand)
-        ds_val   = Patches_WSI_Dataset(df, val_idx,   task=args.task,  patch_resize_size = args.patch_resize_size,
-                                    load_on_demand=args.load_on_demand)
-        ds_test  = Patches_WSI_Dataset(df, test_idx,  task=args.task,  patch_resize_size = args.patch_resize_size,
-                                    load_on_demand=args.load_on_demand)
+        ds_train = Patches_WSI_Dataset(df, train_idx, task=args.task,
+                                       patch_resize_size=args.patch_resize_size,
+                                       load_on_demand=args.load_on_demand)
+        ds_val   = Patches_WSI_Dataset(df, val_idx,   task=args.task,
+                                       patch_resize_size=args.patch_resize_size,
+                                       load_on_demand=args.load_on_demand)
+        ds_test  = Patches_WSI_Dataset(df, test_idx,  task=args.task,
+                                       patch_resize_size=args.patch_resize_size,
+                                       load_on_demand=args.load_on_demand)
+
     print(f"Tiempo de carga: {time.time() - t0:.1f}s  "
           f"(train={len(ds_train)}, val={len(ds_val)}, test={len(ds_test)})", flush=True)
 
@@ -167,13 +181,14 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     num_classes = ds_train.num_classes
+    precomputed = args.precomputed_embeddings_folder is not None
     print(f"Cargando modelo '{args.patch_model}' — num_classes={num_classes} ...", flush=True)
     model = get_model(
         patch_encoder_type=args.patch_model,
         mil_aggregation_mode=args.mil_aggregation_mode,
         unfreeze_backbone=args.unfreeze_patch_model_backbone,
         num_classes=num_classes,
-        skip_encoder=args.precomputed_embeddings_folder is not None,
+        skip_encoder=precomputed,
     ).to(device)
 
     # ── Carpeta de resultados ─────────────────────────────────────────────────
@@ -214,11 +229,11 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         criterion    = nn.CrossEntropyLoss(weight=weights)
         print("Aplicando perdida con pesos por clase", flush=True)
         with open(log_path, "a") as f:
-                f.write("Aplicando perdida con pesos por clase" + "\n")
+            f.write("Aplicando perdida con pesos por clase\n")
         for cls, w in enumerate(weights.cpu().tolist()):
             print(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})", flush=True)
             with open(log_path, "a") as f:
-                f.write(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})" + "\n")
+                f.write(f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})\n")
     else:
         criterion = nn.CrossEntropyLoss()
 
@@ -247,8 +262,6 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     # ── Bucle de entrenamiento ────────────────────────────────────────────────
     best_val_loss = float("inf")
     no_improve    = 0
-
-    precomputed = args.precomputed_embeddings_folder is not None
 
     for epoch in range(args.epochs):
         t_ep = time.time()
@@ -293,19 +306,19 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
 
         accelerator.wait_for_everyone()
         scheduler.step(val_loss)
-        
-        # Save last model for resume_training option
+
+        # Guardar último checkpoint (solo si save_models está activo)
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            accelerator.save_state(last_model_path)
+            if args.save_models:
+                accelerator.save_state(last_model_path)
             print(f"Época {epoch} — {time.time() - t_ep:.1f}s", flush=True)
             with open(log_path, "a") as f:
                 f.write(f"Época {epoch} — {time.time() - t_ep:.1f}s\n")
-        
-        # Checkpoint / Early Stopping
+
+        #  Guardar best model Checkpoint / Control Early Stopping
         if val_loss < best_val_loss:
             best_val_loss, no_improve = val_loss, 0
-              
             if accelerator.is_main_process:
                 accelerator.save_state(best_model_path)
                 print(f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})", flush=True)
@@ -344,6 +357,11 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
                     f.write(test_conf_mat.to_string())
                     f.write("\n\n")
 
+    # Eliminar carpeta de best model checkpoint si no se quieren conservar los modelos
+    if not args.save_models:
+        shutil.rmtree(best_model_path, ignore_errors=True)
+        print("save_models=False — best model checkpoint eliminado tras test.", flush=True)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
@@ -357,88 +375,50 @@ if __name__ == "__main__":
         print(f"Dispositivo: {device}", flush=True)
         ds_train, ds_val, ds_test, df, args, split_report_str = main(args)
         run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, split_report_str)
+
     else:
-        print("Lanzando grid de experimentos ...", flush=True)
-        experiments = [
-            # ── ER ────────────────────────────────────────────────────────
-            dict(task="er", patch_model="uni",  mil_aggregation_mode="transMIL",
-                 learning_rate=5e-6, weight_decay=5e-5),
-            dict(task="er", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="er", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="er", patch_model="dino", mil_aggregation_mode="transMIL",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="er", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
-            dict(task="er", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
+        # ── Grid de hiperparámetros ───────────────────────────────────────────
+        GRID = {
+            "task": [
+                "er", "pr", "her2", "ki67", "molecular_subtype",
+            ],
+            "patch_model": [
+                "dino", "uni",
+            ],
+            "mil_aggregation_mode": [
+                "abMIL-instance-level", "abMIL-bag-level", "transMIL",
+            ],
+            "learning_rate": [
+                1e-4, 1e-5,
+            ],
+            "weight_decay": [
+                1e-4, 1e-5,
+            ],
+        }
 
-            # ── Ki67 ──────────────────────────────────────────────────────
-            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="transMIL",
-                 learning_rate=5e-6, weight_decay=5e-5),
-            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="ki67", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="ki67", patch_model="dino", mil_aggregation_mode="transMIL",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="ki67", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
-            dict(task="ki67", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
+        # Producto cartesiano de todos los valores del grid
+        keys   = list(GRID.keys())
+        combos = list(itertools.product(*GRID.values()))
+        print(f"Lanzando grid de {len(combos)} experimentos ...", flush=True)
 
-            # ── HER2 ──────────────────────────────────────────────────────
-            dict(task="her2", patch_model="uni",  mil_aggregation_mode="transMIL",
-                 learning_rate=1e-5, weight_decay=1e-4),
-            dict(task="her2", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="her2", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="her2", patch_model="dino", mil_aggregation_mode="transMIL",
-                 learning_rate=3e-5, weight_decay=1e-4),
-            dict(task="her2", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=5e-5, weight_decay=5e-5),
-            dict(task="her2", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=5e-5, weight_decay=5e-5),
+        for i, values in enumerate(combos):
+            exp = dict(zip(keys, values))
+            print(f"\n{'='*60}", flush=True)
+            print(f"Experimento {i+1}/{len(combos)}: {exp}", flush=True)
+            print(f"{'='*60}", flush=True)
 
-            # ── PR ────────────────────────────────────────────────────────
-            dict(task="pr", patch_model="uni",  mil_aggregation_mode="transMIL",
-                 learning_rate=1e-5, weight_decay=1e-4),
-            dict(task="pr", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="pr", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="pr", patch_model="dino", mil_aggregation_mode="transMIL",
-                 learning_rate=3e-5, weight_decay=1e-4),
-            dict(task="pr", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=5e-5, weight_decay=5e-5),
-            dict(task="pr", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=5e-5, weight_decay=5e-5),
-
-            # ── Molecular subtype (4 clases) ───────────────────────────────
-            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="transMIL",
-                 learning_rate=6e-6, weight_decay=5e-5),
-            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="molecular_subtype", patch_model="uni",  mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=1e-5, weight_decay=3e-5),
-            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="transMIL",
-                 learning_rate=2e-5, weight_decay=5e-5),
-            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="abMIL-instance-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
-            dict(task="molecular_subtype", patch_model="dino", mil_aggregation_mode="abMIL-bag-level",
-                 learning_rate=3e-5, weight_decay=3e-5),
-        ]
-        for exp in experiments:
             exp_args = copy.deepcopy(args)
             for k, v in exp.items():
                 setattr(exp_args, k, v)
+
             exp_ds_train, exp_ds_val, exp_ds_test, exp_df, _, split_report_str = main(exp_args)
             exp_accelerator = Accelerator()
             exp_device      = exp_accelerator.device
             print(f"Dispositivo: {exp_device}", flush=True)
-            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df, exp_accelerator, exp_device, exp_args, split_report_str)
+
+            run_experiment(exp_ds_train, exp_ds_val, exp_ds_test, exp_df,
+                           exp_accelerator, exp_device, exp_args, split_report_str)
+
             exp_accelerator.free_memory()
             del exp_ds_train, exp_ds_val, exp_ds_test, exp_df
             del exp_accelerator
