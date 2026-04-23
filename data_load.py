@@ -384,7 +384,7 @@ if __name__ == '__main__':
     all_idx = list(range(len(df)))
 
     # 2. Molecular subtype (4-class) con heatmap activado
-    ds_subtype = BreastWSI_Dataset(df, all_idx, task='molecular_subtype',
+    ds_subtype = Patches_WSI_Dataset(df, all_idx, task='molecular_subtype',
                                    load_on_demand=True, inference_heatmap=True)
     print(f"\nSubtype  → size={len(ds_subtype)}, num_classes={ds_subtype.num_classes}")
 
@@ -422,7 +422,7 @@ if __name__ == '__main__':
     print("\n── Biomarker datasets:")
     for biomarker in ('er', 'pr', 'her2', 'ki67'):
         valid_idx = [i for i in all_idx if df.iloc[i][biomarker] != -1]
-        ds = BreastWSI_Dataset(df, valid_idx, task=biomarker, load_on_demand=True)
+        ds = Patches_WSI_Dataset(df, valid_idx, task=biomarker, load_on_demand=True)
         pos = df.iloc[valid_idx][biomarker].sum()
         print(f"   {biomarker.upper():5s} → size={len(ds)}, num_classes={ds.num_classes}, "
               f"positive={int(pos)}/{len(valid_idx)}")

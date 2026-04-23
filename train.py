@@ -58,7 +58,7 @@ def parse_args():
                          "de procesar imágenes con el encoder en cada época.")
     
     # ── Entrenamiento ─────────────────────────────────────────────────────────
-    parser.add_argument("--batch_size",    type=int,   default=8)
+    parser.add_argument("--batch_size",    type=int,   default=32)
     parser.add_argument("--epochs",        type=int,   default=100)
     parser.add_argument("--patience",      type=int,   default=30)
     parser.add_argument("--optimizer",     type=str,   default="AdamW",
@@ -76,7 +76,7 @@ def parse_args():
     parser.add_argument("--seed",                   type=int, default=98)
     parser.add_argument("--experiment_nickname",    type=str, default="")
     parser.add_argument("--save_models",            action="store_true",
-                        help="Si se activa, guarda checkpoints best_model y last_model en disco")
+                        help="Si se activa, guarda checkpoints best_model y last_model en disco (Best model se guarda para hacer la inferencia de test pero se elimina al final si save_models=False)")
 
     parser.add_argument("--resume_training",        action="store_true")
     parser.add_argument("--pretrained_model_path",  type=str, default=None)
@@ -246,7 +246,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
                                 weight_decay=args.weight_decay)
 
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5,
-        patience=10, min_lr=1e-7, threshold=1e-4)
+        patience=15, min_lr=1e-7, threshold=1e-4)
 
     # ── Accelerate ────────────────────────────────────────────────────────────
     model, optimizer, scheduler, train_loader, val_loader, test_loader = accelerator.prepare(
@@ -380,20 +380,16 @@ if __name__ == "__main__":
         # ── Grid de hiperparámetros ───────────────────────────────────────────
         GRID = {
             "task": [
-                "er", "pr", "her2", "ki67", "molecular_subtype",
+                "pr", "her2", "ki67", "molecular_subtype",
             ],
             "patch_model": [
-                "dino", "uni",
+                "uni", "dino",
             ],
             "mil_aggregation_mode": [
                 "abMIL-instance-level", "abMIL-bag-level", "transMIL",
             ],
-            "learning_rate": [
-                1e-4, 1e-5,
-            ],
-            "weight_decay": [
-                1e-4, 1e-5,
-            ],
+            "learning_rate": [5e-6, 1e-5, 3e-5],
+            "weight_decay": [1e-4, 5e-4, 1e-3],
         }
 
         # Producto cartesiano de todos los valores del grid
