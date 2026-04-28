@@ -28,9 +28,22 @@ python patching/extract_patches.py --source /data/BCNB/TIF/ --save_dir /data/BCN
 
 python extract_embeddings.py --patch_model uni  --output_folder /data/BCNB/processed_1024/embeddings
 
-# Crear el contenedor para los experimentos de mama
+# Crear el contenedor para los experimentos
 
 docker run --name apasmel_breast_0 -it --ipc=host --gpus 'device=0' -v /home/apasmel/nas_alejandro_pascual/WSI-Breast-Cancer-Molecular-Subtyping:/workspace -v /mnt/ART-HDD-001:/data  nvcr.io/nvidia/pytorch:25.03-py3
+
+
+# Tmux
+
+tmux new -s mi_sesion
+
+docker exec -it apasmel_breast_0 /bin/bash
+
+tmux attach -t mi_sesion
+
+tmux ls
+
+tmux kill-session -t mi_sesion
 
 # Montar y desmontar disco duro
 

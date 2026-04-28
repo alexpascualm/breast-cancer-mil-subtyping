@@ -18,6 +18,7 @@ from models.patch_encoders.uni_encoder    import UNIEncoder
 ENCODER_REGISTRY: dict[str, type[BasePatchEncoder]] = {
     "dino":  DINOEncoder,
     "uni":   UNIEncoder,
+    "uni2":  UNIEncoder,
     # "conch": CONCHEncoder,
     # "keep":  KEEPEncoder,
 }

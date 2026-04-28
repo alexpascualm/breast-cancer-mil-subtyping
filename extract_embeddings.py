@@ -11,7 +11,7 @@ from huggingface_hub import login
 from torchvision import transforms as T
 from PIL import Image
 
-from utils.train_utils import get_model, ENCODER_CONFIGS
+from utils.train_utils import ENCODER_CONFIGS
 from models.patch_encoders import ENCODER_REGISTRY
 from data_load import create_file_label_df
 from config import bcnb_images_folder_path, bcnb_labels_df_path, bcnb_embeddings_path
@@ -20,7 +20,7 @@ from config import bcnb_images_folder_path, bcnb_labels_df_path, bcnb_embeddings
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--patch_model",     type=str, default="dino",
-                        choices=["dino", "uni", "conch", "keep"])
+                        choices=["dino", "uni", "uni2", "conch", "keep"])
     parser.add_argument("--images_folder",   type=str, default=bcnb_images_folder_path)
     parser.add_argument("--df_path",         type=str, default=bcnb_labels_df_path)
     parser.add_argument("--output_folder",   type=str, default=bcnb_embeddings_path,

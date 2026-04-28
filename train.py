@@ -46,8 +46,8 @@ def parse_args():
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     parser.add_argument("--patch_model", type=str, default="uni",
-        choices=["dino", "uni", "conch", "keep"],
-        help="Extractor de características: dino | uni | conch | keep")
+        choices=["dino", "uni", "uni2", "conch", "keep"],
+        help="Extractor de características: dino | uni | uni2 | conch | keep")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode",       type=str,  default="abMIL-bag-level",
                         choices=["max", "mean", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
@@ -58,9 +58,9 @@ def parse_args():
                          "de procesar imágenes con el encoder en cada época.")
     
     # ── Entrenamiento ─────────────────────────────────────────────────────────
-    parser.add_argument("--batch_size",    type=int,   default=32)
+    parser.add_argument("--batch_size",    type=int,   default=16)
     parser.add_argument("--epochs",        type=int,   default=100)
-    parser.add_argument("--patience",      type=int,   default=30)
+    parser.add_argument("--patience",      type=int,   default=50)
     parser.add_argument("--optimizer",     type=str,   default="AdamW",
                         choices=["SGD", "AdamW"])
     parser.add_argument("--momentum",      type=float, default=0.9,
@@ -134,10 +134,7 @@ def main(args=None):
     t0 = time.time()
     print("Cargando datasets ...", flush=True)
   
-    emb_folder = (
-    os.path.join(args.precomputed_embeddings_folder, args.patch_model)
-    if args.precomputed_embeddings_folder else None
-    )
+    emb_folder = (os.path.join(args.precomputed_embeddings_folder, args.patch_model) if args.precomputed_embeddings_folder else None)
 
     if emb_folder:
         ds_train = Embeddings_WSI_Dataset(df, train_idx, task=args.task,
@@ -380,7 +377,7 @@ if __name__ == "__main__":
         # ── Grid de hiperparámetros ───────────────────────────────────────────
         GRID = {
             "task": [
-                "pr", "her2", "ki67", "molecular_subtype",
+                "er","pr", "her2", "ki67", "molecular_subtype",
             ],
             "patch_model": [
                 "uni", "dino",
@@ -388,10 +385,11 @@ if __name__ == "__main__":
             "mil_aggregation_mode": [
                 "abMIL-instance-level", "abMIL-bag-level", "transMIL",
             ],
-            "learning_rate": [5e-6, 1e-5, 3e-5],
-            "weight_decay": [1e-4, 5e-4, 1e-3],
+            "learning_rate": [1e-5, 5e-5, 1e-4, 3e-4],
+            
+            "weight_decay":  [1e-4, 1e-3, 1e-2, 1e-1],
         }
-
+        
         # Producto cartesiano de todos los valores del grid
         keys   = list(GRID.keys())
         combos = list(itertools.product(*GRID.values()))

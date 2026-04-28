@@ -89,7 +89,12 @@ class WSIClassifier(nn.Module):
 
         # ── Extracción de features ────────────────────────────────────────
         all_patches_cpu = torch.cat(inputs_list, dim=0)   # (N_total, C, H, W)
-        total_feats = self.encoder.forward(all_patches_cpu) # (N_total, embed_dim)
+
+        if not self.encoder.unfreeze_backbone:
+            with torch.no_grad():
+                total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
+        else:
+            total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
 
         # ── Clasificación / agregación ────────────────────────────────────
         if self.is_bag_based:

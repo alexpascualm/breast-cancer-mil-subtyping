@@ -38,8 +38,7 @@ class DINOEncoder(BasePatchEncoder):
         self.build_backbone()
 
     def build_backbone(self) -> None:
-        self.backbone = timm.create_model(self.dino_model_name, pretrained=True, img_size=self.patch_size)
-        self.backbone.reset_classifier(0)
+        self.backbone = timm.create_model(self.dino_model_name, pretrained=True, img_size=self.patch_size, num_classes=0)
         self.embed_dim = self.backbone.num_features
 
         for param in self.backbone.parameters():
