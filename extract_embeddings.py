@@ -72,6 +72,7 @@ def extract_embeddings(args):
     ])
 
     skipped, processed, failed = 0, 0, 0
+    patch_counts = []
 
     for _, row in tqdm(df.iterrows(), total=len(df),
                        desc="Extrayendo embeddings", file=sys.stdout):
@@ -80,6 +81,14 @@ def extract_embeddings(args):
         out_path = os.path.join(model_output_dir, f"{wsi_id}.h5")
 
         if os.path.exists(out_path) and not args.overwrite:
+            try:
+                with h5py.File(out_path, "r") as h5_out:
+                    if "n_patches" in h5_out.attrs:
+                        patch_counts.append(h5_out.attrs["n_patches"])
+                    else:
+                        patch_counts.append(h5_out["embeddings"].shape[0])
+            except Exception as e:
+                print(f"\n[ERROR leyendo skip] {wsi_id}: {e}", flush=True)
             skipped += 1
             continue
 
@@ -91,7 +100,10 @@ def extract_embeddings(args):
             # Transformar y extraer
             patches = torch.stack([transform(Image.fromarray(img)) for img in imgs])
             with torch.no_grad():
-                embeddings = encoder.forward(patches)   # (N, embed_dim) en GPU
+                embeddings = encoder.forward(patches) # (N, embed_dim)
+
+            n_patches = len(embeddings)
+            patch_counts.append(n_patches)
 
             # Guardar en nuevo h5
             with h5py.File(out_path, "w") as h5_out:
@@ -103,13 +115,29 @@ def extract_embeddings(args):
                 # Guardar metadatos útiles
                 h5_out.attrs["encoder"]    = args.patch_model
                 h5_out.attrs["embed_dim"]  = encoder.embed_dim
-                h5_out.attrs["n_patches"]  = len(embeddings)
+                h5_out.attrs["n_patches"]  = n_patches
 
             processed += 1
 
         except Exception as e:
             print(f"\n[ERROR] {wsi_id}: {e}", flush=True)
             failed += 1
+
+    # --- Estadísticas finales ---
+    if len(patch_counts) > 0:
+        patch_counts = np.array(patch_counts)
+        mean_val = np.mean(patch_counts)
+        q1, q2, q3 = np.percentile(patch_counts, [25, 50, 75])
+        min_val = np.min(patch_counts)
+        max_val = np.max(patch_counts)
+
+        print("\nEstadísticas de número de parches por WSI:", flush=True)
+        print(f"Media: {mean_val:.2f}", flush=True)
+        print(f"Q1 (25%): {q1:.2f}", flush=True)
+        print(f"Mediana (50%): {q2:.2f}", flush=True)
+        print(f"Q3 (75%): {q3:.2f}", flush=True)
+        print(f"Mínimo: {min_val}", flush=True)
+        print(f"Máximo: {max_val}", flush=True)
 
     print(f"\nExtracción completa: {processed} procesadas, "
           f"{skipped} saltadas, {failed} fallidas.", flush=True)
