@@ -258,6 +258,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
 
     # ── Bucle de entrenamiento ────────────────────────────────────────────────
     best_val_loss = float("inf")
+    best_val_epoch = -1
     no_improve    = 0
 
     for epoch in range(args.epochs):
@@ -315,7 +316,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
 
         #  Guardar best model Checkpoint / Control Early Stopping
         if val_loss < best_val_loss:
-            best_val_loss, no_improve = val_loss, 0
+            best_val_loss, no_improve, best_val_epoch = val_loss, 0, epoch
             if accelerator.is_main_process:
                 accelerator.save_state(best_model_path)
                 print(f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})", flush=True)
@@ -344,8 +345,8 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         precomputed_embeddings=precomputed,
     )
     if accelerator.is_main_process:
-        log_epoch_metrics("Test", "Test", args.task, test_metrics, test_loss, log_path)
-        save_metrics_to_csv(test_metrics, epoch=0, task=args.task,
+        log_epoch_metrics(best_val_epoch, "Test", args.task, test_metrics, test_loss, log_path)
+        save_metrics_to_csv(test_metrics, epoch=best_val_epoch, task=args.task,
                             filepath=os.path.join(run_results_path, "test_metrics.csv"))
         print("\n --- Matriz de confusión en Test ---\n", flush = True)
         print(test_conf_mat)
