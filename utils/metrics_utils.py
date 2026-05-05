@@ -278,17 +278,18 @@ def log_epoch_metrics(epoch, split_name, task, metrics, loss, output_path):
         f.write(output + "\n")
 
 
-def save_metrics_to_csv(metrics, epoch, task, filepath="metrics.csv"):
+def save_metrics_to_csv(metrics, loss, epoch, task, filepath="metrics.csv"):
     """
     Añade una fila de métricas al CSV de resultados.
 
     Args:
         metrics (dict): salida de compute_breast_metrics.
+        loss (float): pérdida de la época.
         epoch (int): número de época.
         task (str): nombre de la tarea.
         filepath (str): ruta del CSV.
     """
-    row = {"epoch": epoch, "task": task}
+    row = {"epoch": epoch, "task": task, "loss": loss}
 
     for k, v in metrics.items():
         if k == "classification_report":

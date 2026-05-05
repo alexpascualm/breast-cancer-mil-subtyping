@@ -58,9 +58,9 @@ def parse_args():
                          "de procesar imágenes con el encoder en cada época.")
     
     # ── Entrenamiento ─────────────────────────────────────────────────────────
-    parser.add_argument("--batch_size",    type=int,   default=16)
-    parser.add_argument("--epochs",        type=int,   default=100)
-    parser.add_argument("--patience",      type=int,   default=50)
+    parser.add_argument("--batch_size",    type=int,   default=1)
+    parser.add_argument("--epochs",        type=int,   default=20)
+    parser.add_argument("--patience",      type=int,   default=20)
     parser.add_argument("--optimizer",     type=str,   default="AdamW",
                         choices=["SGD", "AdamW"])
     parser.add_argument("--momentum",      type=float, default=0.9,
@@ -274,7 +274,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         )
         if accelerator.is_main_process:
             log_epoch_metrics(epoch, "Train", args.task, train_metrics, train_loss, log_path)
-            save_metrics_to_csv(train_metrics, epoch=epoch, task=args.task,
+            save_metrics_to_csv(train_metrics, train_loss, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "train_metrics.csv"))
             print("\n --- Matriz de confusión en Train ---\n", flush = True)
             print(train_conf_mat)
@@ -292,7 +292,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
         )
         if accelerator.is_main_process:
             log_epoch_metrics(epoch, "Val", args.task, val_metrics, val_loss, log_path)
-            save_metrics_to_csv(val_metrics, epoch=epoch, task=args.task,
+            save_metrics_to_csv(val_metrics, val_loss, epoch=epoch, task=args.task,
                                 filepath=os.path.join(run_results_path, "val_metrics.csv"))
             
             print("\n --- Matriz de confusión en Validación ---\n", flush = True)
@@ -346,7 +346,7 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
     )
     if accelerator.is_main_process:
         log_epoch_metrics(best_val_epoch, "Test", args.task, test_metrics, test_loss, log_path)
-        save_metrics_to_csv(test_metrics, epoch=best_val_epoch, task=args.task,
+        save_metrics_to_csv(test_metrics, test_loss, epoch=best_val_epoch, task=args.task,
                             filepath=os.path.join(run_results_path, "test_metrics.csv"))
         print("\n --- Matriz de confusión en Test ---\n", flush = True)
         print(test_conf_mat)
