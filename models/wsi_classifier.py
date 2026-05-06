@@ -60,7 +60,13 @@ class WSIClassifier(nn.Module):
         
         # Clasificador de parche — solo para estrategias instance-based
         if not self.is_bag_based:
-            self.patch_classifier = nn.Linear(embed_dim, num_classes)   
+            # self.patch_classifier = nn.Linear(embed_dim, num_classes)
+            self.patch_classifier = nn.Sequential(
+                                    nn.Linear(embed_dim, embed_dim//2),
+                                    nn.ReLU(inplace=True),
+                                    nn.Dropout(0.2),
+                                    nn.Linear(embed_dim//2, num_classes)
+                                    )         
         else:
             self.patch_classifier = None
 
@@ -95,7 +101,7 @@ class WSIClassifier(nn.Module):
                 total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
         else:
             total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
-
+        
         # ── Clasificación / agregación ────────────────────────────────────
         if self.is_bag_based:
             # El MIL agrega en espacio de features con su propio clasificador
