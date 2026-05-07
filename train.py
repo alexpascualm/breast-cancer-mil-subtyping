@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument("--momentum",      type=float, default=0.9,
                         help="Solo para SGD")
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    parser.add_argument("--weight_decay",  type=float, default=1e-5)
+    parser.add_argument("--weight_decay",  type=float, default=1e-3)
     parser.add_argument("--weighted_loss", action="store_true",
                         help="Aplicar pesos de clase en la función de pérdida")
 
@@ -303,7 +303,8 @@ def run_experiment(ds_train, ds_val, ds_test, df, accelerator, device, args, spl
                     f.write("\n\n")
 
         accelerator.wait_for_everyone()
-        scheduler.step(val_loss)
+        if accelerator.is_main_process:
+            scheduler.step(val_loss)
 
         # Guardar último checkpoint (solo si save_models está activo)
         accelerator.wait_for_everyone()
@@ -386,9 +387,7 @@ if __name__ == "__main__":
             "mil_aggregation_mode": [
                 "abMIL-instance-level", "abMIL-bag-level", "transMIL",
             ],
-            "learning_rate": [1e-5, 5e-5, 1e-4, 3e-4],
-            
-            "weight_decay":  [1e-4, 1e-3, 1e-2, 1e-1],
+            "learning_rate": [1e-6, 1e-5, 5e-5, 1e-4],
         }
         
         # Producto cartesiano de todos los valores del grid
