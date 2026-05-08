@@ -1,7 +1,7 @@
 """
 utils/train_utils.py
 --------------------
-Utilidades de entrenamiento: semillas, get_model, splits, run_epoch.
+Utilidades de entrenamiento: semillas, get_model, splits k-fold, run_epoch.
 """
 
 import torch
@@ -36,12 +36,12 @@ ENCODER_CONFIGS = {
         "patch_size":     224,
         "embed_dim":      1024,         # ViT-L/16
     },
-    "uni2": {
-        "uni_model_name": "MahmoodLab/UNI2-h",
-        "patch_size":     224,
-        "embed_dim":      1536,         # ViT-L/16
-    }
 
+    # "uni2": {
+    #     "uni_model_name": "MahmoodLab/UNI2-h",
+    #     "patch_size":     224,
+    #     "embed_dim":      1536,         # ViT-H/14
+    # },
     # "conch": {
     #     "conch_model_name": "MahmoodLab/conchv1_5",
     #     "patch_size":       448,
@@ -50,7 +50,7 @@ ENCODER_CONFIGS = {
     # "keep": {
     #     "keep_model_name": "Astaxanthin/KEEP",
     #     "patch_size":      224,
-    #     "embed_dim":       1024,   
+    #     "embed_dim":       1024,
     # },
 }
 
@@ -98,7 +98,8 @@ def get_model(
     skip_encoder=False (modo normal):
         1. Instancia el encoder de parches desde ENCODER_REGISTRY.
         2. Instancia WSIClassifier combinando encoder + MIL + clasificador.
-        El embed_dim se lee de ENCODER_CONFIGS y se extrae antes de pasarlo al encoder para evitar kwargs inesperados.
+        El embed_dim se lee de ENCODER_CONFIGS y se descarta antes de pasarlo
+        al encoder para evitar kwargs inesperados.
 
     skip_encoder=True (modo embeddings precomputados):
         Solo instancia el MIL + clasificador, sin cargar ningún backbone.
@@ -106,12 +107,12 @@ def get_model(
         Requiere usar WSIClassifier.forward_from_embeddings() en lugar de forward().
 
     Args:
-        patch_encoder_type (str) : 'dino' | 'uni' | 'conch' | 'keep'.
+        patch_encoder_type (str) : 'dino' | 'uni'.
         mil_aggregation_mode (str): 'max' | 'mean' | 'abMIL-instance-level' | 'abMIL-bag-level' | 'transMIL'.
         unfreeze_backbone (bool) : descongelar últimos bloques del backbone (ignorado si skip_encoder=True).
         num_classes (int)        : número de clases de salida.
         chunk_size (int)         : mini-batch interno de parches (ignorado si skip_encoder=True).
-        skip_encoder (bool)      : si True, no instancia el encoder — usar con embeddings precomputados.
+        skip_encoder (bool)      : si True, no instancia el encoder — Se deben usar con embeddings precomputados.
 
     Returns:
         WSIClassifier
@@ -124,7 +125,7 @@ def get_model(
         )
 
     if skip_encoder:
-        # Solo MIL + clasificador, sin backbone. Útil cuando los embeddings ya están precomputados en disco y no se quiere cargar el ViT en memoria.
+        # Solo MIL + clasificador, sin backbone. Útil cuando los embeddings ya están precomputados en disco y no se quiere cargar el encoder en memoria.
         model = WSIClassifier(
             encoder=None,
             mil_aggregation_mode=mil_aggregation_mode,
@@ -132,14 +133,14 @@ def get_model(
             embed_dim=ENCODER_CONFIGS[key]["embed_dim"],
         )
     else:
-        encoder_kwargs = {k: v for k, v in ENCODER_CONFIGS[key].items() if k != "embed_dim"} # embed_dim se descarta porque el encoder lo asigna internamente tras build_backbone() y no se le pasa como argumento directo.
-
+        # embed_dim se descarta porque el encoder lo asigna internamente
+        # y no lo acepta como argumento directo.
+        encoder_kwargs = {k: v for k, v in ENCODER_CONFIGS[key].items() if k != "embed_dim"}
         encoder = ENCODER_REGISTRY[key](
             chunk_size=chunk_size,
             unfreeze_backbone=unfreeze_backbone,
             **encoder_kwargs,
         )
-
         model = WSIClassifier(
             encoder=encoder,
             mil_aggregation_mode=mil_aggregation_mode,
@@ -173,70 +174,103 @@ def compute_class_weights(labels, num_classes):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SPLITS
+# K-FOLD SPLITS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def make_splits(df, label_col, seed):
+def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
     """
-    Divide el DataFrame en índices de train / val / test respetando grupos
-    de paciente y estratificando por etiqueta (StratifiedGroupKFold).
-    El DataFrame recibido ya debe estar filtrado (sin etiquetas -1) y tener
-    la columna 'patient_id' como string.
-    Proporciones: 70% train · 15% val · 15% test.
-    Imprime las proporciones de clase del DataFrame completo y de cada split.
+    Genera k particiones de (train_idx, val_idx, test_idx) mediante
+    k-fold estratificado por grupo de paciente, sin data leakage entre folds.
+
+    Estrategia de asignación de folds:
+        En cada iteración i (0-indexado):
+            - test  ← fold  i
+            - val   ← fold (i + 1) % k
+            - train ← los k-2 folds restantes
+
+    De este modo, cada fold actúa exactamente una vez como test y exactamente
+    una vez como validación a lo largo de las k iteraciones, y nunca hay
+    solapamiento entre train, val y test dentro de una misma iteración.
+
+    La estratificación se aplica a nivel de grupo de paciente con
+    StratifiedGroupKFold, garantizando que:
+        · Todas las WSI de un mismo paciente caen en el mismo fold.
+        · La distribución de clases es similar en todos los folds.
+
     Args:
-        df        : pd.DataFrame filtrado para la tarea.
-        label_col : str  columna de etiquetas (== task name).
+        df        : pd.DataFrame filtrado para la tarea (sin etiquetas -1).
+                    Debe contener la columna 'patient_id' como string.
+        label_col : str  columna de etiquetas (== nombre de la tarea).
         seed      : int  semilla para reproducibilidad.
+        k         : int  número de folds (por defecto 5).
+
     Returns:
-        train_idx, val_idx, test_idx  — arrays de índices posicionales sobre df.
+        folds       : lista de k tuplas (train_idx, val_idx, test_idx),
+                      donde cada *_idx es un np.ndarray de índices posicionales
+                      sobre df. Útil cuando el llamador quiere los índices ya
+                      combinados (p.ej. para construir datasets directamente).
+        fold_indices: lista de k arrays con los índices posicionales de cada
+                      fold base antes de combinarlos. Útil cuando el llamador
+                      prefiere cargar k datasets base y luego fusionarlos en
+                      memoria con ConcatDataset según la iteración.
+        report_str  : str  resumen de distribuciones por fold listo para loguear.
     """
-    def get_proportions_str(name, indices):
-        subset = df.iloc[indices] if not isinstance(indices, pd.Index) else df.loc[indices]
+    if k < 3:
+        raise ValueError(
+            f"k-fold requiere al menos k=3 folds (test + val + ≥1 train). "
+            f"Se recibió k={k}."
+        )
+
+    # ── Generar los k folds base ──────────────────────────────────────────────
+    sgkf = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed)
+
+    # fold_indices[i] = array de índices posicionales de las WSI en el fold i
+    fold_indices = [
+        test_pos_idx
+        for _, test_pos_idx in sgkf.split(
+            np.arange(len(df)),
+            df[label_col].values,
+            groups=df["patient_id"].values,
+        )
+    ]
+
+    # ── Construir las k iteraciones train/val/test ────────────────────────────
+    def _proportions_str(name, idx_array):
+        subset = df.iloc[idx_array]
         counts = subset[label_col].value_counts().sort_index()
         props  = subset[label_col].value_counts(normalize=True).sort_index()
-        lines  = [f"\n  [{name}]  n={len(subset)}"]
+        lines  = [f"  [{name}]  n={len(subset)}"]
         for cls in counts.index:
             lines.append(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})")
         return "\n".join(lines)
 
-    print("=" * 45)
-    print(f"SPLITS — tarea: '{label_col}'  seed={seed}")
-    print("=" * 45)
+    report_lines = [
+        "=" * 55,
+        f"K-FOLD SPLITS — tarea: '{label_col}'  k={k}  seed={seed}",
+        "=" * 55,
+        _proportions_str("TOTAL", np.arange(len(df))),
+    ]
 
-    report_lines = ["=" * 45, f"SPLITS — tarea: '{label_col}'  seed={seed}", "=" * 45]
+    folds = []
+    for i in range(k):
+        test_idx  = fold_indices[i]
+        val_idx   = fold_indices[(i + 1) % k]
+        train_idx = np.concatenate(
+            [fold_indices[j] for j in range(k) if j != i and j != (i + 1) % k]
+        )
 
-    total_str = get_proportions_str("TOTAL", df.index)
-    print(total_str)
-    report_lines.append(total_str)
+        folds.append((train_idx, val_idx, test_idx))
 
-    # Test split
-    sgkf_test = StratifiedGroupKFold(n_splits=7, shuffle=True, random_state=seed)
-    train_val_idx, test_idx = next(
-        sgkf_test.split(df.index, df[label_col], groups=df["patient_id"])
-    )
+        report_lines.append(f"\n── Fold {i} ──────────────────────────────────────")
+        report_lines.append(_proportions_str(f"TRAIN (folds ≠ {i},{(i+1)%k})", train_idx))
+        report_lines.append(_proportions_str(f"VAL   (fold {(i+1)%k})",         val_idx))
+        report_lines.append(_proportions_str(f"TEST  (fold {i})",                test_idx))
 
-    # Val split
-    sub = df.iloc[train_val_idx]
-    sgkf_val = StratifiedGroupKFold(n_splits=6, shuffle=True, random_state=seed)
-    rel_train_idx, rel_val_idx = next(
-        sgkf_val.split(sub.index, sub[label_col], groups=sub["patient_id"])
-    )
-
-    train_idx = train_val_idx[rel_train_idx]
-    val_idx   = train_val_idx[rel_val_idx]
-
-    for name, idx in [("TRAIN", train_idx), ("VAL", val_idx), ("TEST", test_idx)]:
-        split_str = get_proportions_str(name, idx)
-        print(split_str)
-        report_lines.append(split_str)
-
-    print("=" * 45)
-    report_lines.append("=" * 45)
-
+    report_lines.append("=" * 55)
     report_str = "\n".join(report_lines)
+    print(report_str, flush=True)
 
-    return train_idx, val_idx, test_idx, report_str
+    return folds, fold_indices, report_str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -268,7 +302,7 @@ def run_epoch(
         task (str): tarea activa — determina cómo interpretar etiquetas y métricas.
         mode (str): 'train' | 'val' | 'test'.
         inference_heatmap (bool): si True, acumula info para generar heatmaps.
-        precomputed_embeddings (bool): si True, el dataloader ya devuelve embeddings en vez de imágenes y se usa model.forward_from_embeddings().
+        precomputed_embeddings (bool): si True, el dataloader devuelve embeddings en vez de imágenes y se usa model.forward_from_embeddings().
 
     Returns:
         metrics (dict): métricas de la época.
@@ -383,10 +417,7 @@ def run_epoch(
 
         metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
 
-        conf_mat = confusion_matrix(
-            y_true, y_pred, labels=np.arange(num_classes)
-        )
-
+        conf_mat = confusion_matrix(y_true, y_pred, labels=np.arange(num_classes))
         conf_mat_df = pd.DataFrame(
             conf_mat,
             index=[f"true_{i}" for i in range(conf_mat.shape[0])],
