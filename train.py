@@ -109,9 +109,7 @@ def parse_args():
     # ── Modo multi-configuración ───────────────────────────────────────────────
     parser.add_argument("--run_all_configs", action="store_true",
                         help="Ejecuta automáticamente todas las combinaciones "
-                             "encoder x MIL para cada tarea en ALL_TASKS. "
-                             "Los folds y datasets se calculan una sola vez "
-                             "por tarea y se reutilizan para cada combinación.")
+                             "encoder x MIL x Tarea definidas en las listas ALL_ENCODERS, ALL_MIL_MODES y ALL_TASKS.")
 
 
     return parser.parse_args()
@@ -123,11 +121,11 @@ def parse_args():
 # ──────────────────────────────────────────────────────────────────────────────
 
 ALL_TASKS = [
-    "molecular_subtype",
     "er",
     "pr",
     "her2",
     "ki67",
+    "molecular_subtype",
 ]
 
 ALL_ENCODERS = [
@@ -169,10 +167,8 @@ def prepare_task_data(args, task: str, patch_model: str = None):
 
     Returns:
         df_task          : pd.DataFrame filtrado para la tarea.
-        base_datasets    : lista de k datasets, donde base_datasets[i]
-                        contiene las WSI del fold i.
-        fold_indices     : lista de k np.ndarray con los índices posicionales
-                        de cada fold sobre df_task.
+        base_datasets    : lista de k datasets, donde base_datasets[i] contiene las WSI del fold i.
+        fold_indices     : lista de k np.ndarray con los índices posicionales de cada fold sobre df_task.
         kfold_report_str : str resumen de distribuciones por fold.
     """
     print(f"\n{'='*60}", flush=True)
@@ -200,28 +196,21 @@ def prepare_task_data(args, task: str, patch_model: str = None):
     print(f"Distribución:\n{df_task[task].value_counts()}", flush=True)
 
     # ── K-Fold splits ─────────────────────────────────────────────────────────
-    # folds      → k tuplas (train_idx, val_idx, test_idx) con índices ya combinados
     # fold_indices → k arrays base, uno por fold puro (sin combinar)
-    _folds, fold_indices, kfold_report_str = make_kfold_splits(df_task, label_col=task, seed=args.seed, k=args.kfold)
+    fold_indices, kfold_report_str = make_kfold_splits(df_task, label_col=task, seed=args.seed, k=args.kfold)
 
     # ── k datasets base (uno por fold) ────────────────────────────────────────
     patch_model = patch_model if patch_model is not None else args.patch_model
-    emb_folder = (
-        os.path.join(args.precomputed_embeddings_folder, patch_model)
-        if args.precomputed_embeddings_folder
-        else None
-    )
-
-    DatasetClass = Embeddings_WSI_Dataset if emb_folder else Patches_WSI_Dataset
+    emb_folder = os.path.join(args.precomputed_embeddings_folder, patch_model) if args.precomputed_embeddings_folder else None
 
     def _make_base_dataset(idx):
         """Construye un dataset para los índices posicionales `idx`."""
         if emb_folder:
-            return DatasetClass(
+            return Embeddings_WSI_Dataset(
                 df_task, idx, task=task,
                 embeddings_folder=emb_folder,
                 load_on_demand=args.load_on_demand)
-        return DatasetClass(
+        return Patches_WSI_Dataset(
             df_task, idx, task=task,
             patch_resize_size=args.patch_resize_size,
             load_on_demand=args.load_on_demand)
@@ -362,7 +351,6 @@ def run_kfold_experiment(
                 end_fold   = f"── Fold {(fold_i + 1) % k} "
 
                 total_part = kfold_report_str.split("── Fold ")[0]
-
                 fold_part = kfold_report_str.split(start_fold)[1]
 
                 if end_fold in fold_part:
@@ -370,7 +358,7 @@ def run_kfold_experiment(
 
                 f.write(f"=== Fold {fold_i} ===\n")
                 f.write(total_part)
-                f.write(start_fold + fold_part)
+                f.write(start_fold + fold_part + "\n")
 
         # ── DataLoaders ───────────────────────────────────────────────────────
         train_loader = DataLoader(
@@ -435,11 +423,11 @@ def run_kfold_experiment(
 
         scheduler = ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5,
-            patience=15, min_lr=1e-7, threshold=1e-4,
+            patience=10, min_lr=1e-7, threshold=1e-4,
         )
 
         # ── Accelerate ────────────────────────────────────────────────────────
-        (model, optimizer, scheduler, train_loader, val_loader, test_loader) = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader, test_loader)
+        model, optimizer, scheduler, train_loader, val_loader, test_loader = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader, test_loader)
 
         if args.resume_training:
             if not args.pretrained_model_path:

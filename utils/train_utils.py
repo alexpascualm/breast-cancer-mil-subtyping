@@ -205,10 +205,6 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
         k         : int  número de folds (por defecto 5).
 
     Returns:
-        folds       : lista de k tuplas (train_idx, val_idx, test_idx),
-                      donde cada *_idx es un np.ndarray de índices posicionales
-                      sobre df. Útil cuando el llamador quiere los índices ya
-                      combinados (p.ej. para construir datasets directamente).
         fold_indices: lista de k arrays con los índices posicionales de cada
                       fold base antes de combinarlos. Útil cuando el llamador
                       prefiere cargar k datasets base y luego fusionarlos en
@@ -251,26 +247,20 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
         _proportions_str("TOTAL", np.arange(len(df))),
     ]
 
-    folds = []
     for i in range(k):
         test_idx  = fold_indices[i]
         val_idx   = fold_indices[(i + 1) % k]
-        train_idx = np.concatenate(
-            [fold_indices[j] for j in range(k) if j != i and j != (i + 1) % k]
-        )
-
-        folds.append((train_idx, val_idx, test_idx))
+        train_idx = np.concatenate([fold_indices[j] for j in range(k) if j != i and j != (i + 1) % k])
 
         report_lines.append(f"\n── Fold {i} ──────────────────────────────────────")
         report_lines.append(_proportions_str(f"TRAIN (folds ≠ {i},{(i+1)%k})", train_idx))
         report_lines.append(_proportions_str(f"VAL   (fold {(i+1)%k})",         val_idx))
         report_lines.append(_proportions_str(f"TEST  (fold {i})",                test_idx))
 
-    report_lines.append("=" * 55)
     report_str = "\n".join(report_lines)
     print(report_str, flush=True)
 
-    return folds, fold_indices, report_str
+    return fold_indices, report_str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
