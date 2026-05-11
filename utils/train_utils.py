@@ -329,6 +329,9 @@ def run_epoch(
             inputs, labels, wsi_ids, _ = batch_info
 
         labels = labels.to(device)
+
+        if mode == "train":
+            optimizer.zero_grad(set_to_none=True)
         
         if precomputed_embeddings:
             # inputs es lista de tensores de embeddings — se mueven a device y se procesan con model.forward_from_embeddings()
@@ -341,7 +344,6 @@ def run_epoch(
         loss = criterion(wsi_logits, labels)
 
         if mode == "train":
-            optimizer.zero_grad()
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
