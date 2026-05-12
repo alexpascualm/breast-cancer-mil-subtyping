@@ -353,15 +353,14 @@ def run_epoch(
 
         # Loss
         batch_size = labels.size(0)
+        loss_value   = loss.detach() * batch_size                                   
+        count_value  = torch.tensor(batch_size, dtype=torch.float32, device=device)
 
-        loss_sum = loss.detach() * batch_size
+        loss_sum_reduced  = accelerator.reduce(loss_value,  reduction="sum")
+        count_reduced     = accelerator.reduce(count_value, reduction="sum")
 
-        loss_sum_reduced = accelerator.reduce(loss_sum, reduction="sum")
-        count_reduced    = accelerator.reduce(torch.tensor(batch_size, device=device), reduction="sum")
-
-        if accelerator.is_main_process:
-            total_loss_sum += loss_sum_reduced.item()
-            total_seen     += count_reduced.item()
+        total_loss_sum += loss_sum_reduced.item()
+        total_seen     += count_reduced.item()
 
         # Gather métricas
         gat_labels, gat_preds, gat_probs = accelerator.gather_for_metrics(
@@ -396,7 +395,7 @@ def run_epoch(
                     "weights":      patch_weights,
                 })
 
-    epoch_loss = total_loss_sum / total_seen if accelerator.is_main_process else 0.0
+    epoch_loss = total_loss_sum / total_seen
 
     metrics = {}
     conf_mat_df = pd.DataFrame()
