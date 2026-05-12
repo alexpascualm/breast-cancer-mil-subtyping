@@ -15,6 +15,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from accelerate import Accelerator
+from accelerate.utils import broadcast
 import gc
 
 from data_load import (
@@ -484,8 +485,10 @@ def run_kfold_experiment(
                     f.write("\n\n")
 
             accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                scheduler.step(val_loss)
+            val_loss_tensor = torch.tensor(val_loss, device=device)
+            broadcast(val_loss_tensor, from_process=0)
+            val_loss_sync = val_loss_tensor.item()
+            scheduler.step(val_loss_sync)
 
             # Último checkpoint
             accelerator.wait_for_everyone()
@@ -498,20 +501,23 @@ def run_kfold_experiment(
                     f.write(f"Época {epoch} — {elapsed:.1f}s\n")
 
             # Best model / Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss, no_improve, best_val_epoch = val_loss, 0, epoch
-                if accelerator.is_main_process:
+            should_stop = torch.tensor(0, device=device)
+            if accelerator.is_main_process:
+                if val_loss_sync < best_val_loss:
+                    best_val_loss, no_improve, best_val_epoch = val_loss_sync, 0, epoch
                     accelerator.save_state(best_model_path)
                     msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})"
                     print(msg, flush=True)
                     with open(log_path, "a") as f:
                         f.write(msg + "\n")
-            else:
-                no_improve += 1
-                if no_improve >= args.patience:
-                    if accelerator.is_main_process:
+                else:
+                    no_improve += 1
+                    if no_improve >= args.patience:
                         print("Early stopping activado.", flush=True)
-                    break
+                        should_stop.fill_(1)
+            broadcast(should_stop, from_process=0)
+            if should_stop.item() == 1:
+                break
 
         # ── Test ──────────────────────────────────────────────────────────────
         if accelerator.is_main_process:
