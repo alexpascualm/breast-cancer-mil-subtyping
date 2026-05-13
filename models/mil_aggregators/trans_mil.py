@@ -168,7 +168,13 @@ class TransMIL(BaseMIL):
         _H = _W = math.ceil(math.sqrt(N))
         pad_len = _H * _W - N
         if pad_len > 0:
-            h = torch.cat([h, h[:, :pad_len, :]], dim=1)   # repite primeros parches
+            pad_tensor = torch.zeros(
+                (1, pad_len, h.size(-1)),
+                device=h.device,
+                dtype=h.dtype
+            )
+            h = torch.cat([h, pad_tensor], dim=1)
+    
 
         # 3. CLS token
         cls = self.cls_token.to(h.device)   # (1, 1, dim_model)
