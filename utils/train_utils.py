@@ -307,122 +307,122 @@ def run_epoch(
     else:
         model.eval()
 
-    torch.set_grad_enabled(mode == "train")
+    with torch.set_grad_enabled(mode == "train"):
 
-    num_classes = 4 if task == "molecular_subtype" else 2
+        num_classes = 4 if task == "molecular_subtype" else 2
 
-    all_y_true, all_y_pred, all_y_prob = [], [], []
-    heatmap_list = []
+        all_y_true, all_y_pred, all_y_prob = [], [], []
+        heatmap_list = []
 
-    total_loss_sum = 0.0
-    total_seen = 0
+        total_loss_sum = 0.0
+        total_seen = 0
 
-    for batch_info in tqdm(
-        dataloader,
-        desc=mode.upper(),
-        disable=not accelerator.is_main_process,
-        file=sys.stdout,
-    ):
-        if inference_heatmap:
-            inputs, labels, wsi_ids, coords = batch_info
-        else:
-            inputs, labels, wsi_ids, _ = batch_info
+        for batch_info in tqdm(
+            dataloader,
+            desc=mode.upper(),
+            disable=not accelerator.is_main_process,
+            file=sys.stdout,
+        ):
+            if inference_heatmap:
+                inputs, labels, wsi_ids, coords = batch_info
+            else:
+                inputs, labels, wsi_ids, _ = batch_info
 
-        labels = labels.to(device)
+            labels = labels.to(device)
 
-        if mode == "train":
-            optimizer.zero_grad(set_to_none=True)
-        
-        if precomputed_embeddings:
-            # inputs es lista de tensores de embeddings — se mueven a device y se procesan con model.forward_from_embeddings()
-            inputs_device = [emb.to(device, non_blocking=True) for emb in inputs]
-            wsi_logits, patch_logits_list, weights_list = model.forward_from_embeddings(inputs_device)
-        else:
-            # inputs es lista de tensores de imágenes — se procesan con model.forward() y se mueven a device dentro del encoder.forward
-            wsi_logits, patch_logits_list, weights_list = model(inputs)
+            if mode == "train":
+                optimizer.zero_grad(set_to_none=True)
+            
+            if precomputed_embeddings:
+                # inputs es lista de tensores de embeddings — se mueven a device y se procesan con model.forward_from_embeddings()
+                inputs_device = [emb.to(device, non_blocking=True) for emb in inputs]
+                wsi_logits, patch_logits_list, weights_list = model.forward_from_embeddings(inputs_device)
+            else:
+                # inputs es lista de tensores de imágenes — se procesan con model.forward() y se mueven a device dentro del encoder.forward
+                wsi_logits, patch_logits_list, weights_list = model(inputs)
 
-        loss = criterion(wsi_logits, labels)
+            loss = criterion(wsi_logits, labels)
 
-        if mode == "train":
-            accelerator.backward(loss)
-            accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if mode == "train":
+                accelerator.backward(loss)
+                accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-        probs = torch.softmax(wsi_logits.detach(), dim=1)
-        preds = probs.argmax(dim=1)
+            probs = torch.softmax(wsi_logits.detach(), dim=1)
+            preds = probs.argmax(dim=1)
 
-        # Loss
-        batch_size = labels.size(0)
-        loss_value   = loss.detach() * batch_size                                   
-        count_value  = torch.tensor(batch_size, dtype=torch.float32, device=device)
+            # Loss
+            batch_size = labels.size(0)
+            loss_value   = loss.detach() * batch_size                                   
+            count_value  = torch.tensor(batch_size, dtype=torch.float32, device=device)
 
-        loss_sum_reduced  = accelerator.reduce(loss_value,  reduction="sum")
-        count_reduced     = accelerator.reduce(count_value, reduction="sum")
+            loss_sum_reduced  = accelerator.reduce(loss_value,  reduction="sum")
+            count_reduced     = accelerator.reduce(count_value, reduction="sum")
 
-        total_loss_sum += loss_sum_reduced.item()
-        total_seen     += count_reduced.item()
+            total_loss_sum += loss_sum_reduced.item()
+            total_seen     += count_reduced.item()
 
-        # Gather métricas
-        gat_labels, gat_preds, gat_probs = accelerator.gather_for_metrics(
-            (labels, preds, probs)
-        )
+            # Gather métricas
+            gat_labels, gat_preds, gat_probs = accelerator.gather_for_metrics(
+                (labels, preds, probs)
+            )
 
-        if accelerator.is_main_process:
-            all_y_true.append(gat_labels.cpu())
-            all_y_pred.append(gat_preds.cpu())
-            all_y_prob.append(gat_probs.cpu())
+            if accelerator.is_main_process:
+                all_y_true.append(gat_labels.cpu())
+                all_y_pred.append(gat_preds.cpu())
+                all_y_prob.append(gat_probs.cpu())
 
-        # Heatmap: SOLO acumulación local (sin gather aquí)
-        if inference_heatmap:
-            for i in range(len(inputs)):
-                # patch_logits_list[i] puede ser None en estrategias bag-based (transMIL)
-                patch_scores = (
-                    torch.argmax(patch_logits_list[i], dim=1).cpu().numpy()
-                    if patch_logits_list[i] is not None
-                    else None
-                )
-                patch_weights = (
-                    weights_list[i].detach().cpu().numpy()
-                    if weights_list[i] is not None
-                    else None
-                )
-                heatmap_list.append({
-                    "wsi_id":       wsi_ids[i],
-                    "pred_label":   preds[i].item(),
-                    "true_label":   labels[i].item(),
-                    "coords":       coords[i],
-                    "patch_scores": patch_scores,
-                    "weights":      patch_weights,
-                })
+            # Heatmap: SOLO acumulación local (sin gather aquí)
+            if inference_heatmap:
+                for i in range(len(inputs)):
+                    # patch_logits_list[i] puede ser None en estrategias bag-based (transMIL)
+                    patch_scores = (
+                        torch.argmax(patch_logits_list[i], dim=1).cpu().numpy()
+                        if patch_logits_list[i] is not None
+                        else None
+                    )
+                    patch_weights = (
+                        weights_list[i].detach().cpu().numpy()
+                        if weights_list[i] is not None
+                        else None
+                    )
+                    heatmap_list.append({
+                        "wsi_id":       wsi_ids[i],
+                        "pred_label":   preds[i].item(),
+                        "true_label":   labels[i].item(),
+                        "coords":       coords[i],
+                        "patch_scores": patch_scores,
+                        "weights":      patch_weights,
+                    })
 
-    epoch_loss = total_loss_sum / total_seen
+        epoch_loss = total_loss_sum / total_seen
 
-    metrics = {}
-    conf_mat_df = pd.DataFrame()
-    heatmap_df = None
-
-    if accelerator.is_main_process:
-        y_true = torch.cat(all_y_true).numpy()
-        y_pred = torch.cat(all_y_pred).numpy()
-        y_prob = torch.cat(all_y_prob).numpy()
-
-        metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
-
-        conf_mat = confusion_matrix(y_true, y_pred, labels=np.arange(num_classes))
-        conf_mat_df = pd.DataFrame(
-            conf_mat,
-            index=[f"true_{i}" for i in range(conf_mat.shape[0])],
-            columns=[f"pred_{i}" for i in range(conf_mat.shape[1])],
-        )
-
-    # Gather heatmaps al final
-    if inference_heatmap:
-        gathered_heatmaps = accelerator.gather_object(heatmap_list)
+        metrics = {}
+        conf_mat_df = pd.DataFrame()
+        heatmap_df = None
 
         if accelerator.is_main_process:
-            # flatten lista de listas
-            flat_heatmaps = [item for sublist in gathered_heatmaps for item in sublist]
-            flat_heatmaps = sorted(flat_heatmaps, key=lambda x: x["wsi_id"])
-            heatmap_df = pd.DataFrame(flat_heatmaps)
+            y_true = torch.cat(all_y_true).numpy()
+            y_pred = torch.cat(all_y_pred).numpy()
+            y_prob = torch.cat(all_y_prob).numpy()
+
+            metrics = compute_breast_metrics(task, y_true, y_pred, y_prob)
+
+            conf_mat = confusion_matrix(y_true, y_pred, labels=np.arange(num_classes))
+            conf_mat_df = pd.DataFrame(
+                conf_mat,
+                index=[f"true_{i}" for i in range(conf_mat.shape[0])],
+                columns=[f"pred_{i}" for i in range(conf_mat.shape[1])],
+            )
+
+        # Gather heatmaps al final
+        if inference_heatmap:
+            gathered_heatmaps = accelerator.gather_object(heatmap_list)
+
+            if accelerator.is_main_process:
+                # flatten lista de listas
+                flat_heatmaps = [item for sublist in gathered_heatmaps for item in sublist]
+                flat_heatmaps = sorted(flat_heatmaps, key=lambda x: x["wsi_id"])
+                heatmap_df = pd.DataFrame(flat_heatmaps)
 
     return metrics, conf_mat_df, epoch_loss, heatmap_df
