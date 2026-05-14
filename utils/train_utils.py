@@ -79,6 +79,109 @@ def set_multiple_seed(seed: int = 42, deterministic: bool = True):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SPLIT INICIAL DEV / TEST
+# ──────────────────────────────────────────────────────────────────────────────
+
+def stratified_dev_test_split(
+    df: pd.DataFrame,
+    label_col: str = "molecular_subtype",
+    test_size: float = 0.20,
+    seed: int = 42,
+) -> tuple:
+    """
+    Divide el DataFrame maestro en dev (80 %) y test (20 %) de forma
+    estratificada a nivel de grupo de paciente.
+
+    Estrategia
+    ----------
+    Se usa StratifiedGroupKFold con n_splits = round(1 / test_size) para
+    obtener exactamente un fold como test (≈ test_size) y el resto como dev,
+    garantizando:
+        · Todas las WSI de un mismo paciente caen en el mismo subconjunto.
+        · La distribución de clases de `label_col` es similar en dev y test.
+
+    Solo se realiza una iteración del splitter (el primer fold actúa como test).
+
+    Args
+    ----
+    df        : pd.DataFrame maestro completo (salida de create_file_label_df).
+                Debe contener las columnas 'patient_id' y `label_col`.
+    label_col : str — columna usada como estrato para la estratificación.
+                Se recomienda 'molecular_subtype' por ser la etiqueta multiclase.
+    test_size : float — proporción aproximada reservada para test (por defecto 0.20).
+    seed      : int — semilla para reproducibilidad.
+
+    Returns
+    -------
+    dev_df  : pd.DataFrame con el 80 % de los datos (índice reseteado).
+    test_df : pd.DataFrame con el 20 % de los datos (índice reseteado).
+
+    Raises
+    ------
+    ValueError
+        Si `label_col` no existe en df o contiene valores -1 (inválidos).
+    """
+    if label_col not in df.columns:
+        raise ValueError(
+            f"La columna '{label_col}' no existe en el DataFrame. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+
+    # Filtrar muestras con etiqueta válida para el estrato
+    df_valid = df[df[label_col] != -1].reset_index(drop=True)
+    n_invalid = len(df) - len(df_valid)
+    if n_invalid > 0:
+        print(
+            f"[WARN] stratified_dev_test_split: se excluyen {n_invalid} WSI con "
+            f"etiqueta -1 en '{label_col}'. Se incluirán en dev por separado.",
+            flush=True,
+        )
+
+    n_splits = round(1.0 / test_size)   # 0.20 → 5 splits; el primer fold es test (~20 %)
+
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    # Una sola iteración: primer fold → test, resto → dev
+    split_iter = sgkf.split(
+        np.arange(len(df_valid)),
+        df_valid[label_col].values,
+        groups=df_valid["patient_id"].values,
+    )
+    dev_pos_idx, test_pos_idx = next(split_iter)
+
+    dev_df  = df_valid.iloc[dev_pos_idx].reset_index(drop=True)
+    test_df = df_valid.iloc[test_pos_idx].reset_index(drop=True)
+
+    # Añadir al dev las muestras con etiqueta inválida (si las hubiera)
+    if n_invalid > 0:
+        invalid_df = df[df[label_col] == -1].reset_index(drop=True)
+        dev_df = pd.concat([dev_df, invalid_df], ignore_index=True)
+
+    # ── Reporte ───────────────────────────────────────────────────────────────
+    total = len(dev_df) + len(test_df)
+    print(
+        f"\n{'='*55}\n"
+        f"SPLIT DEV / TEST  (estrato='{label_col}',  seed={seed})\n"
+        f"{'='*55}\n"
+        f"  Total : {total:>4d} WSIs\n"
+        f"  Dev   : {len(dev_df):>4d} WSIs  ({len(dev_df)/total:.1%})\n"
+        f"  Test  : {len(test_df):>4d} WSIs  ({len(test_df)/total:.1%})\n",
+        flush=True,
+    )
+
+    for split_name, split_df in [("DEV", dev_df), ("TEST", test_df)]:
+        counts = split_df[label_col].value_counts().sort_index()
+        props  = split_df[label_col].value_counts(normalize=True).sort_index()
+        print(f"  [{split_name}]  distribución de '{label_col}':", flush=True)
+        for cls in counts.index:
+            if cls == -1:
+                continue
+            print(f"    clase {cls}: {counts[cls]:>4d}  ({props[cls]:.1%})", flush=True)
+
+    return dev_df, test_df
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # GET MODEL
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -177,20 +280,14 @@ def compute_class_weights(labels, num_classes):
 # K-FOLD SPLITS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
+def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 4):
     """
-    Genera k particiones de (train_idx, val_idx, test_idx) mediante
+    Genera los k arrays de índices base para cross-validation mediante
     k-fold estratificado por grupo de paciente, sin data leakage entre folds.
 
-    Estrategia de asignación de folds:
-        En cada iteración i (0-indexado):
-            - test  ← fold  i
-            - val   ← fold (i + 1) % k
-            - train ← los k-2 folds restantes
-
-    De este modo, cada fold actúa exactamente una vez como test y exactamente
-    una vez como validación a lo largo de las k iteraciones, y nunca hay
-    solapamiento entre train, val y test dentro de una misma iteración.
+    La asignación concreta de train/val a partir de estos arrays se realiza
+    en `run_kfolds` de train.py, donde cada fold i actúa como validación y
+    el resto como entrenamiento.
 
     La estratificación se aplica a nivel de grupo de paciente con
     StratifiedGroupKFold, garantizando que:
@@ -205,22 +302,19 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
         k         : int  número de folds (por defecto 5).
 
     Returns:
-        fold_indices: lista de k arrays con los índices posicionales de cada
-                      fold base antes de combinarlos. Útil cuando el llamador
-                      prefiere cargar k datasets base y luego fusionarlos en
-                      memoria con ConcatDataset según la iteración.
-        report_str  : str  resumen de distribuciones por fold listo para loguear.
+        fold_indices     : lista de k arrays con los índices posicionales
+                           de cada fold base.
+        kfold_report_str : str — resumen de distribuciones por fold.
     """
-    if k < 3:
+    if k < 2:
         raise ValueError(
-            f"k-fold requiere al menos k=3 folds (test + val + ≥1 train). "
-            f"Se recibió k={k}."
+            f"El número de folds debe ser ≥ 2 para tener al menos 1 fold de train "
+            f"separado del de validación. Valor recibido: k={k}."
         )
 
     # ── Generar los k folds base ──────────────────────────────────────────────
     sgkf = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed)
 
-    # fold_indices[i] = array de índices posicionales de las WSI en el fold i
     fold_indices = [
         test_pos_idx
         for _, test_pos_idx in sgkf.split(
@@ -230,7 +324,7 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
         )
     ]
 
-    # ── Construir las k iteraciones train/val/test ────────────────────────────
+    # ── Construir las k iteraciones train / val ───────────────────────────────
     def _proportions_str(name, idx_array):
         subset = df.iloc[idx_array]
         counts = subset[label_col].value_counts().sort_index()
@@ -248,14 +342,12 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 5):
     ]
 
     for i in range(k):
-        test_idx  = fold_indices[i]
-        val_idx   = fold_indices[(i + 1) % k]
-        train_idx = np.concatenate([fold_indices[j] for j in range(k) if j != i and j != (i + 1) % k])
+        val_idx   = fold_indices[i]
+        train_idx = np.concatenate([fold_indices[j] for j in range(k) if j != i])
 
         report_lines.append(f"\n── Fold {i} ──────────────────────────────────────")
-        report_lines.append(_proportions_str(f"TRAIN (folds ≠ {i},{(i+1)%k})", train_idx))
-        report_lines.append(_proportions_str(f"VAL   (fold {(i+1)%k})",         val_idx))
-        report_lines.append(_proportions_str(f"TEST  (fold {i})",                test_idx))
+        report_lines.append(_proportions_str(f"TRAIN (folds ≠ {i})", train_idx))
+        report_lines.append(_proportions_str(f"VAL   (fold {i})",     val_idx))
 
     report_str = "\n".join(report_lines)
     print(report_str, flush=True)

@@ -30,6 +30,7 @@ from utils.train_utils import (
     compute_class_weights,
     make_kfold_splits,
     run_epoch,
+    stratified_dev_test_split,
 )
 from utils.metrics_utils import log_epoch_metrics, save_metrics_to_csv
 from config import bcnb_images_folder_path, bcnb_labels_df_path, results_folder_path
@@ -85,10 +86,8 @@ def parse_args():
                         help="Aplicar pesos de clase en la función de pérdida")
 
     # ── K-Fold ────────────────────────────────────────────────────────────────
-    parser.add_argument("--kfold", type=int, default=5,
-                        help="Número de folds para cross-validation (mínimo 3). "
-                             "En cada iteración i se usa el fold i como test y "
-                             "el fold (i+1)%%k como validación.")
+    parser.add_argument("--kfold", type=int, default=4,
+                        help="Número de folds para cross-validation (mínimo 2). ")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--load_on_demand",         action="store_true")
@@ -97,9 +96,7 @@ def parse_args():
     parser.add_argument("--experiment_nickname",    type=str, default="")
     parser.add_argument("--save_models",            action="store_true",
                         help="Si se activa, guarda checkpoints best_model y "
-                             "last_model en disco. El best_model se usa para "
-                             "la inferencia de test y se elimina al final si "
-                             "save_models=False.")
+                             "last_model en disco.")
 
     parser.add_argument("--resume_training",       action="store_true")
     parser.add_argument("--pretrained_model_path", type=str, default=None)
@@ -111,7 +108,6 @@ def parse_args():
     parser.add_argument("--run_all_configs", action="store_true",
                         help="Ejecuta automáticamente todas las combinaciones "
                              "encoder x MIL x Tarea definidas en las listas ALL_ENCODERS, ALL_MIL_MODES y ALL_TASKS.")
-
 
     return parser.parse_args()
 
@@ -142,38 +138,41 @@ ALL_MIL_MODES = [
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PREPARACIÓN DE DATOS POR TAREA
+# PASO 1 · SPLIT INICIAL DEV / TEST
+# Genera el DataFrame maestro completo y lo divide en dev (80 %) y test (20 %).
+# Guarda físicamente ambos splits en results/ antes de continuar.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def prepare_task_data(args, task: str, patch_model: str = None):
+def prepare_task_data(args) -> tuple:
     """
-    Crea y filtra el DataFrame maestro para `task`, genera los k folds base y carga un dataset por fold.
+    Construye el DataFrame maestro y realiza el split estratificado dev/test.
 
-    Comportamiento según el modo de ejecución:
+    El split se hace a nivel de 'molecular_subtype' para que la distribución
+    de subtipos sea representativa en ambos conjuntos, usando la columna
+    'patient_id' como grupo para evitar data-leakage entre pacientes.
 
-    - Modo normal (sin embeddings precomputados):
-        Los datasets pueden reutilizarse entre distintos encoders porque los datos contienen imágenes y el encoder se aplica dinámicamente durante el forward.
+    Proporciones
+    ------------
+    - dev  : 80 % del total de pacientes únicos
+    - test : 20 % del total de pacientes únicos
 
-    - Modo embeddings precomputados:
-        Los datasets dependen del encoder activo porque cada encoder produce embeddings con distinta dimensionalidad (`embed_dim`). En este caso, los datasets deben reconstruirse cada vez que cambia el encoder para apuntar al subdirectorio correcto: precomputed_embeddings_folder/<encoder>/
+    Persistencia
+    ------------
+    Ambos DataFrames se guardan en CSV dentro de `results/` antes de retornar:
+        results/dev_df.csv
+        results/test_df.csv
 
-    Los folds (`fold_indices`) siguen siendo reutilizables porque dependen únicamente de la tarea y del DataFrame filtrado.
+    Args
+    ----
+    args : Namespace con los argumentos de línea de comandos.
 
-    Args:
-        args : Namespace con los argumentos de línea de comandos.
-        task : str
-            Nombre de la tarea (columna de etiquetas).
-        patch_model : str
-            Encoder asociado a los embeddings precomputados. Si es None, se usa args.patch_model.
-
-    Returns:
-        df_task          : pd.DataFrame filtrado para la tarea.
-        base_datasets    : lista de k datasets, donde base_datasets[i] contiene las WSI del fold i.
-        fold_indices     : lista de k np.ndarray con los índices posicionales de cada fold sobre df_task.
-        kfold_report_str : str resumen de distribuciones por fold.
+    Returns
+    -------
+    dev_df  : pd.DataFrame con las muestras de desarrollo (80 %).
+    test_df : pd.DataFrame con las muestras de test (20 %).
     """
     print(f"\n{'='*60}", flush=True)
-    print(f"Preparando datos para tarea: '{task}'", flush=True)
+    print("Preparando datos: split inicial DEV / TEST", flush=True)
     print(f"{'='*60}", flush=True)
 
     # ── DataFrame maestro ─────────────────────────────────────────────────────
@@ -192,17 +191,157 @@ def prepare_task_data(args, task: str, patch_model: str = None):
 
     df["patient_id"] = df["patient_id"].astype(str)
 
-    df_task = df[df[task] != -1].reset_index(drop=True)
+    print(f"Total WSIs en el DataFrame maestro: {len(df)}", flush=True)
+
+    # ── Split estratificado 80/20 usando molecular_subtype como estrato ───────
+    # Se estratifica por molecular_subtype porque es la etiqueta con más clases
+    # y garantiza representatividad en los splits de todas las tareas.
+    dev_df, test_df = stratified_dev_test_split(
+        df,
+        label_col="molecular_subtype",
+        test_size=0.20,
+        seed=args.seed,
+    )
+
+    print(
+        f"\nSplit completado:\n"
+        f"  dev  → {len(dev_df):>4d} WSIs ({len(dev_df)/len(df):.1%})\n"
+        f"  test → {len(test_df):>4d} WSIs ({len(test_df)/len(df):.1%})",
+        flush=True,
+    )
+
+    # ── Guardar copias físicas en results/ ────────────────────────────────────
+    os.makedirs(args.results_path, exist_ok=True)
+    dev_path  = os.path.join(args.results_path, "dev_df.csv")
+    test_path = os.path.join(args.results_path, "test_df.csv")
+
+    dev_df.to_csv(dev_path,  index=False)
+    test_df.to_csv(test_path, index=False)
+
+    print(f"\nDataFrames guardados en:\n  {dev_path}\n  {test_path}", flush=True)
+
+    return dev_df, test_df
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PASO 2 · CONFIGURACIÓN DE VALIDACIÓN
+# Filtra dev_df para la tarea concreta y aplica make_kfold_splits.
+# Devuelve únicamente los fold_indices y el resumen de proporciones.
+# NO construye datasets, NO lanza entrenamiento.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def prepare_task(args, dev_df, task: str) -> str:
+    """
+    Prepara la partición K-Fold sobre el conjunto de desarrollo para una tarea.
+
+    Recibe exclusivamente `dev_df` (nunca el test set) y aplica la lógica de
+    make_kfold_splits para generar los índices de validación cruzada.
+
+    Args
+    ----
+    args    : Namespace con los argumentos de línea de comandos.
+    dev_df  : pd.DataFrame con las muestras de desarrollo (salida de prepare_task_data).
+    task    : str — nombre de la tarea / columna de etiquetas.
+
+    Returns
+    -------
+    fold_indices     : lista de k np.ndarray con los índices posicionales de
+                       cada fold sobre df_task.
+    kfold_report_str : str — descripción de las proporciones utilizadas en
+                       cada fold (train / val).
+    """
+    print(f"\n{'='*60}", flush=True)
+    print(f"Configurando K-Fold para tarea: '{task}'", flush=True)
+    print(f"{'='*60}", flush=True)
+
+    # Filtrar muestras con etiqueta válida para esta tarea
+    df_task = dev_df[dev_df[task] != -1].reset_index(drop=True)
     print(f"WSIs con etiqueta válida para '{task}': {len(df_task)}", flush=True)
     print(f"Distribución:\n{df_task[task].value_counts()}", flush=True)
 
-    # ── K-Fold splits ─────────────────────────────────────────────────────────
-    # fold_indices → k arrays base, uno por fold puro (sin combinar)
-    fold_indices, kfold_report_str = make_kfold_splits(df_task, label_col=task, seed=args.seed, k=args.kfold)
+    # Partición K-Fold estratificada por grupo de paciente
+    # Devuelve los índices de cada fold y el reporte de proporciones.
+    # En este paso NO se construyen datasets ni se lanza entrenamiento.
+    fold_indices, kfold_report_str = make_kfold_splits(
+        df_task,
+        label_col=task,
+        seed=args.seed,
+        k=args.kfold,
+    )
 
-    # ── k datasets base (uno por fold) ────────────────────────────────────────
-    patch_model = patch_model if patch_model is not None else args.patch_model
-    emb_folder = os.path.join(args.precomputed_embeddings_folder, patch_model) if args.precomputed_embeddings_folder else None
+    return df_task, fold_indices, kfold_report_str
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PASO 3 · LÓGICA DE ENTRENAMIENTO
+# Opera únicamente sobre folds de desarrollo (train + val).
+# No utiliza el test set original.
+# Al finalizar guarda best_eval.csv con las métricas de la mejor época de val.
+# Estructura de almacenamiento: results/experiments/{experiment_path}/
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_kfolds(
+    df_task,
+    fold_indices,
+    accelerator,
+    device,
+    args,
+    kfold_report_str: str,
+    task: str,
+    patch_model: str,
+    mil_aggregation_mode: str,
+):
+    """
+    Ejecuta el entrenamiento con K-Fold cross-validation.
+
+    Opera exclusivamente sobre los folds de desarrollo (train y validación).
+    No existe ninguna referencia al test set original en este flujo.
+
+    Asignación de folds en cada iteración i (0-indexado):
+        - val   ← fold  i
+        - train ← todos los folds restantes (k-1 folds)
+
+    Al finalizar todas las iteraciones genera `best_eval.csv` dentro de cada
+    subcarpeta de fold con las métricas obtenidas en la mejor época de
+    validación (según val_loss mínima).
+
+    Estructura de almacenamiento
+    ----------------------------
+    results/
+      experiments/
+        {experiment_path}/         ← carpeta raíz aislada por experimento
+          experiment_log.txt
+          fold_0/
+            train_log.txt
+            train_metrics.csv
+            val_metrics.csv
+            best_eval.csv          ← métricas de val en la mejor época
+            [best_model/]          ← solo si --save_models
+            [last_model/]          ← solo si --save_models
+          fold_1/
+            ...
+
+    Args
+    ----
+    df_task              : pd.DataFrame filtrado para la tarea (solo dev).
+    fold_indices         : lista de k np.ndarray con índices posicionales de
+                           cada fold sobre df_task.
+    accelerator          : Accelerator de HuggingFace.
+    device               : torch.device.
+    args                 : Namespace con todos los argumentos.
+    kfold_report_str     : str — resumen de splits (se escribe en el log).
+    task                 : str — nombre de la tarea activa.
+    patch_model          : str — nombre del encoder activo.
+    mil_aggregation_mode : str — modo de agregación MIL activo.
+    """
+    precomputed = args.precomputed_embeddings_folder is not None
+    k = len(fold_indices)
+
+    # ── Construir datasets base (uno por fold) ────────────────────────────────
+    emb_folder = (
+        os.path.join(args.precomputed_embeddings_folder, patch_model)
+        if precomputed else None
+    )
 
     def _make_base_dataset(idx):
         """Construye un dataset para los índices posicionales `idx`."""
@@ -217,73 +356,16 @@ def prepare_task_data(args, task: str, patch_model: str = None):
             load_on_demand=args.load_on_demand)
 
     t0 = time.time()
-    print(f"Cargando {args.kfold} datasets base ...", flush=True)
-
+    print(f"Cargando {k} datasets base ...", flush=True)
     base_datasets = []
     for fold_i, idx in enumerate(fold_indices):
         ds = _make_base_dataset(idx)
         base_datasets.append(ds)
         print(f"  Fold base {fold_i}: {len(ds)} WSIs", flush=True)
-
     print(f"Tiempo de carga: {time.time() - t0:.1f}s", flush=True)
 
-    return df_task, base_datasets, fold_indices, kfold_report_str
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# EXPERIMENTO K-FOLD
-# Itera sobre los k folds y entrena/evalúa un modelo para cada uno.
-# ──────────────────────────────────────────────────────────────────────────────
-
-def run_kfold_experiment(
-    df_task,
-    base_datasets,
-    fold_indices,
-    accelerator,
-    device,
-    args,
-    kfold_report_str,
-    task: str,
-    patch_model: str,
-    mil_aggregation_mode: str,
-):
-    """
-    Ejecuta el entrenamiento con k-fold cross-validation para una combinación
-    concreta de (tarea, encoder, modo MIL).
-
-    Los k datasets base (uno por fold) se ensamblan en memoria en cada
-    iteración i usando ConcatDataset, sin releer datos de disco:
-        - ds_test  ← base_datasets[i]
-        - ds_val   ← base_datasets[(i+1) % k]
-        - ds_train ← ConcatDataset(base_datasets[j] para j ≠ i, (i+1)%k)
-
-    fold_indices se usa exclusivamente para calcular los pesos de clase del
-    split train de cada iteración (requiere índices posicionales sobre df_task).
-
-    Por cada fold:
-        · Construye DataLoaders sobre los datasets ensamblados.
-        · Instancia un modelo fresco.
-        · Entrena con early stopping sobre val_loss.
-        · Evalúa en test desde el mejor checkpoint de validación.
-        · Guarda métricas y logs en fold_i/ dentro del dir del experimento.
-
-    Args:
-        df_task              : pd.DataFrame filtrado para la tarea.
-        base_datasets        : lista de k datasets base (uno por fold).
-        fold_indices         : lista de k np.ndarray con índices posicionales
-                               de cada fold base sobre df_task.
-        accelerator          : Accelerator de HuggingFace.
-        device               : torch.device.
-        args                 : Namespace con todos los argumentos.
-        kfold_report_str     : str  resumen de splits (se escribe en el log).
-        task                 : str  nombre de la tarea activa.
-        patch_model          : str  nombre del encoder activo.
-        mil_aggregation_mode : str  modo de agregación MIL activo.
-    """
-    precomputed = args.precomputed_embeddings_folder is not None
-    k = len(base_datasets)
-
-    # ── Carpeta raíz de este experimento (encoder × MIL × tarea) ─────────────
+    # ── Carpeta raíz de este experimento ──────────────────────────────────────
+    # Almacenamiento aislado: results/experiments/{experiment_path}/
     exp_results_path = ""
     if accelerator.is_main_process:
         timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -305,9 +387,9 @@ def run_kfold_experiment(
             f"_MIL-{mil_aggregation_mode}"
             f"_{opt_name}_lr{args.learning_rate}_wd{args.weight_decay}"
             f"_bs{args.batch_size}_ep{args.epochs}"
-            f"_{args.kfold}fold{small}"
+            f"_{k}fold{small}"
         )
-        exp_results_path = os.path.join(args.results_path, run_name)
+        exp_results_path = os.path.join(args.results_path, "experiments", run_name)
         os.makedirs(exp_results_path, exist_ok=True)
         print(f"\nResultados del experimento en: {exp_results_path}", flush=True)
 
@@ -318,25 +400,28 @@ def run_kfold_experiment(
             f.write(kfold_report_str + "\n\n")
 
     # ── Iterar sobre los k folds ──────────────────────────────────────────────
+    # Cada fold i usa fold_i como validación y el resto como entrenamiento.
     for fold_i in range(k):
-        val_fold_i  = (fold_i + 1) % k
-        train_fold_js = [j for j in range(k) if j != fold_i and j != val_fold_i]
+        train_fold_js = [j for j in range(k) if j != fold_i]
 
         # Ensamblar splits combinando datasets base en memoria (sin releer disco)
-        ds_test  = base_datasets[fold_i]
-        ds_val   = base_datasets[val_fold_i]
+        ds_val   = base_datasets[fold_i]
         ds_train = ConcatDataset([base_datasets[j] for j in train_fold_js])
 
         # Índices posicionales del train en df_task (necesarios para weighted_loss)
         train_global_indices = np.concatenate([fold_indices[j] for j in train_fold_js])
+
         if accelerator.is_main_process:
             print(f"\n{'─'*60}", flush=True)
-            print(f"  FOLD {fold_i}/{k-1}  "
-                  f"[task={task}  encoder={patch_model}  MIL={mil_aggregation_mode}]",
-                  flush=True)
+            print(
+                f"  FOLD {fold_i}/{k-1}  "
+                f"[task={task}  encoder={patch_model}  MIL={mil_aggregation_mode}]",
+                flush=True,
+            )
+            print(f"  TRAIN: {len(ds_train)} WSIs  |  VAL: {len(ds_val)} WSIs", flush=True)
             print(f"{'─'*60}", flush=True)
 
-        # Subcarpeta por fold
+        # Subcarpeta aislada por fold dentro del experimento
         fold_results_path = os.path.join(exp_results_path, f"fold_{fold_i}")
         if accelerator.is_main_process:
             os.makedirs(fold_results_path, exist_ok=True)
@@ -347,16 +432,12 @@ def run_kfold_experiment(
 
         if accelerator.is_main_process:
             with open(log_path, "a") as f:
-                # Extraer del reporte global la sección correspondiente a este fold y escribirla en el log de este fold
                 start_fold = f"── Fold {fold_i} "
                 end_fold   = f"── Fold {(fold_i + 1) % k} "
-
                 total_part = kfold_report_str.split("── Fold ")[0]
-                fold_part = kfold_report_str.split(start_fold)[1]
-
+                fold_part  = kfold_report_str.split(start_fold)[1]
                 if end_fold in fold_part:
                     fold_part = fold_part.split(end_fold)[0]
-
                 f.write(f"=== Fold {fold_i} ===\n")
                 f.write(total_part)
                 f.write(start_fold + fold_part + "\n")
@@ -368,10 +449,6 @@ def run_kfold_experiment(
         )
         val_loader = DataLoader(
             ds_val, batch_size=args.batch_size, shuffle=False,
-            collate_fn=collate_fn, num_workers=0,
-        )
-        test_loader = DataLoader(
-            ds_test, batch_size=args.batch_size, shuffle=False,
             collate_fn=collate_fn, num_workers=0,
         )
 
@@ -428,7 +505,7 @@ def run_kfold_experiment(
         )
 
         # ── Accelerate ────────────────────────────────────────────────────────
-        model, optimizer, scheduler, train_loader, val_loader, test_loader = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader, test_loader)
+        model, optimizer, scheduler, train_loader, val_loader = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader)
 
         if args.resume_training:
             if not args.pretrained_model_path:
@@ -437,9 +514,10 @@ def run_kfold_experiment(
             print(f"Reanudando desde: {args.pretrained_model_path}", flush=True)
 
         # ── Bucle de entrenamiento ────────────────────────────────────────────
-        best_val_loss  = float("inf")
-        best_val_epoch = -1
-        no_improve     = 0
+        best_val_loss    = float("inf")
+        best_val_epoch   = -1
+        best_val_metrics = {}
+        no_improve       = 0
 
         for epoch in range(args.epochs):
             t_ep = time.time()
@@ -504,68 +582,59 @@ def run_kfold_experiment(
             should_stop = torch.tensor(0, device=device)
             if accelerator.is_main_process:
                 if val_loss_sync < best_val_loss:
-                    best_val_loss, no_improve, best_val_epoch = val_loss_sync, 0, epoch
-                    accelerator.save_state(best_model_path)
-                    msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})"
-                    print(msg, flush=True)
-                    with open(log_path, "a") as f:
-                        f.write(msg + "\n")
+                    best_val_loss    = val_loss_sync
+                    best_val_epoch   = epoch
+                    best_val_metrics = val_metrics      # guardar métricas de la mejor época
+                    no_improve       = 0
+                    if args.save_models:
+                        accelerator.save_state(best_model_path)
+                        msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})"
+                        print(msg, flush=True)
+                        with open(log_path, "a") as f:
+                            f.write(msg + "\n")
                 else:
                     no_improve += 1
                     if no_improve >= args.patience:
                         print("Early stopping activado.", flush=True)
                         should_stop.fill_(1)
+
             broadcast(should_stop, from_process=0)
             if should_stop.item() == 1:
                 break
 
-        # ── Test ──────────────────────────────────────────────────────────────
+        # ── Guardar best_eval.csv con métricas de la mejor época de validación ─
         if accelerator.is_main_process:
-            print(f"\n──── Fold {fold_i} · TEST ────", flush=True)
-
-        accelerator.wait_for_everyone()
-        try:
-            accelerator.load_state(best_model_path)
-        except Exception as e:
-            print(f"Error cargando checkpoint: {e}", flush=True)
-
-        test_metrics, test_conf_mat, test_loss, _ = run_epoch(
-            model, test_loader, device, accelerator,
-            criterion, None, task=task, mode="test",
-            precomputed_embeddings=precomputed,
-        )
-        if accelerator.is_main_process:
-            log_epoch_metrics(
-                best_val_epoch, "Test", task, test_metrics, test_loss, log_path
-            )
+            best_eval_path = os.path.join(fold_results_path, "best_eval.csv")
             save_metrics_to_csv(
-                test_metrics, test_loss, epoch=best_val_epoch, task=task,
-                filepath=os.path.join(fold_results_path, "test_metrics.csv"),
+                best_val_metrics, best_val_loss,
+                epoch=best_val_epoch, task=task,
+                filepath=best_eval_path,
             )
-            print("\n --- Matriz de confusión en Test ---\n", flush=True)
-            print(test_conf_mat)
-            with open(log_path, "a") as f:
-                f.write("\n --- Matriz de confusión en Test ---\n")
-                f.write(test_conf_mat.to_string())
-                f.write("\n\n")
-
-        # Limpiar best_model si no se quieren conservar los modelos
-        if not args.save_models:
-            shutil.rmtree(best_model_path, ignore_errors=True)
             print(
-                "save_models=False — best model checkpoint eliminado tras test.",
+                f"\n  best_eval.csv guardado en: {best_eval_path}\n"
+                f"  (mejor época de validación: {best_val_epoch}, "
+                f"val_loss={best_val_loss:.4f})",
                 flush=True,
             )
 
         # Liberar modelo y optimizador para el siguiente fold
         accelerator.free_memory()
-        del model, optimizer, scheduler, train_loader, val_loader, test_loader
+        del model, optimizer, scheduler, train_loader, val_loader
         torch.cuda.empty_cache()
         gc.collect()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
+# Coordina el flujo:
+#   1. Split inicial dev/test  (prepare_task_data)
+#   2. Para cada tarea × encoder × MIL:
+#      a. Configuración K-Fold sobre dev  (prepare_task)
+#      b. Entrenamiento K-Fold             (run_kfolds)
+#
+# El flujo se detiene tras la validación cruzada.
+# La fase de re-entrenamiento sobre dev completo + evaluación en test
+# queda pendiente de implementación.
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -580,12 +649,16 @@ if __name__ == "__main__":
     device      = accelerator.device
     print(f"Dispositivo: {device}", flush=True)
 
+    # ── PASO 1: split inicial dev / test ──────────────────────────────────────
+    dev_df, test_df = prepare_task_data(args)
+
     if not args.run_all_configs:
-        # ── Modo single: una tarea, un encoder, un MIL ───────────────────────
-        df_task, base_datasets, fold_indices, kfold_report_str = prepare_task_data(args, args.task, args.patch_model)
-        run_kfold_experiment(
+        # ── Modo single: una tarea, un encoder, un MIL ────────────────────────
+        df_task, fold_indices, kfold_report_str = prepare_task(
+            args, dev_df, task=args.task,
+        )
+        run_kfolds(
             df_task              = df_task,
-            base_datasets        = base_datasets,
             fold_indices         = fold_indices,
             accelerator          = accelerator,
             device               = device,
@@ -597,7 +670,7 @@ if __name__ == "__main__":
         )
 
     else:
-        # ── Modo multi-configuración: todas las combinaciones encoder × MIL ──
+        # ── Modo multi-configuración: todas las combinaciones MIL × encoder ───
         encoder_mil_combos = list(itertools.product(ALL_ENCODERS, ALL_MIL_MODES))
         total = len(ALL_TASKS) * len(encoder_mil_combos)
         print(
@@ -609,8 +682,10 @@ if __name__ == "__main__":
 
         exp_counter = 0
         for task in ALL_TASKS:
-            # Los folds dependen solo de la tarea, no del encoder
-            cached_data_per_encoder = {}
+            # Los folds dependen solo de la tarea, no del encoder.
+            # Cacheamos el resultado de prepare_task para reutilizarlo
+            # en todas las combinaciones de encoder × MIL de esta tarea.
+            cached_task_data: dict = {}
 
             for patch_model, mil_mode in encoder_mil_combos:
                 # ──────────────────────────────────────────────────────────────
@@ -620,13 +695,20 @@ if __name__ == "__main__":
                 # Si NO usamos embeddings:
                 #   podemos reutilizar datasets entre encoders para una misma tarea, porque el encoder se aplica dinámicamente en cada forward.
                 # ──────────────────────────────────────────────────────────────
-                cache_key = (patch_model if args.precomputed_embeddings_folder is not None else "shared")
-                if cache_key not in cached_data_per_encoder:
-                    df_task, base_datasets, fold_indices, kfold_report_str = prepare_task_data(args, task, patch_model=patch_model)
-                    cached_data_per_encoder[cache_key] = (df_task, base_datasets, fold_indices, kfold_report_str)
+                cache_key = (
+                    patch_model
+                    if args.precomputed_embeddings_folder is not None
+                    else "shared"
+                )
 
-                (df_task, base_datasets, fold_indices, kfold_report_str) = cached_data_per_encoder[cache_key]
-       
+                if cache_key not in cached_task_data:
+                    df_task, fold_indices, kfold_report_str = prepare_task(
+                        args, dev_df, task=task,
+                    )
+                    cached_task_data[cache_key] = (df_task, fold_indices, kfold_report_str)
+
+                df_task, fold_indices, kfold_report_str = cached_task_data[cache_key]
+
                 exp_counter += 1
                 print(
                     f"\n{'='*60}\n"
@@ -641,10 +723,10 @@ if __name__ == "__main__":
                 exp_args.task                 = task
                 exp_args.patch_model          = patch_model
                 exp_args.mil_aggregation_mode = mil_mode
-                
-                run_kfold_experiment(
+
+                # PASO 2 + 3: validación cruzada sobre dev
+                run_kfolds(
                     df_task              = df_task,
-                    base_datasets        = base_datasets,
                     fold_indices         = fold_indices,
                     accelerator          = accelerator,
                     device               = device,
@@ -657,3 +739,11 @@ if __name__ == "__main__":
 
                 torch.cuda.empty_cache()
                 gc.collect()
+
+        print(
+            f"\n{'='*60}\n"
+            f"Validación cruzada completada para {exp_counter} experimentos.\n"
+            f"Fase de re-entrenamiento sobre dev completo pendiente de implementar.\n"
+            f"{'='*60}",
+            flush=True,
+        )
