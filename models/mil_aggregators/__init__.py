@@ -5,12 +5,12 @@ Registro central de estrategias MIL y clase MILAggregator.
 
 Familias de estrategias
 -----------------------
-INSTANCE-BASED (max, mean, abMIL-instance-level):
+INSTANCE-BASED (max-instance-level, mean-instance-level, abMIL-instance-level):
     Reciben patch_logits y patch_feats.
     El clasificador de parche vive en WSIClassifier (patch_classifier).
     El módulo MIL pondera o reduce los logits de parche ya calculados.
 
-BAG-BASED (transMIL, abMIL-bag-level):
+BAG-BASED (max-bag-level, mean-bag-level, abMIL-bag-level, transMIL):
     Reciben patch_feats directamente y llevan su propio clasificador
     de WSI interno. Ignoran patch_logits.
     WSIClassifier detecta estas estrategias via BAG_BASED_STRATEGIES
@@ -18,11 +18,13 @@ BAG-BASED (transMIL, abMIL-bag-level):
 
 Claves CLI disponibles
 -----------------------
-    "max"                  → MaxMIL              (instance-based)
-    "mean"                 → MeanMIL             (instance-based)
+    "max-instance-level"   → MaxInstanceMIL              (instance-based)
+    "max-bag-level"        → MaxBagMIL                   (bag-based)
+    "mean-instance-level"  → MeanInstanceMIL             (instance-based)
+    "mean-bag-level"       → MeanBagMIL                  (bag-based)
     "abMIL-instance-level" → AttentionMIL_InstanceLevel  (instance-based)
-    "abMIL-bag-level"      → AttentionMIL_BagLevel        (bag-based)
-    "transMIL"             → TransMIL            (bag-based)
+    "abMIL-bag-level"      → AttentionMIL_BagLevel       (bag-based)
+    "transMIL"             → TransMIL                    (bag-based)
 
 Para añadir una estrategia nueva:
     1. Crear su módulo heredando de BaseMIL.
@@ -34,15 +36,20 @@ import torch
 import torch.nn as nn
 
 from models.mil_aggregators.base_mil      import BaseMIL
-from models.mil_aggregators.simple_mil    import MaxMIL, MeanMIL
+from models.mil_aggregators.simple_mil    import (
+    MaxInstanceMIL, MaxBagMIL,
+    MeanInstanceMIL, MeanBagMIL,
+)
 from models.mil_aggregators.attention_mil import AttentionMIL_InstanceLevel, AttentionMIL_BagLevel
 from models.mil_aggregators.trans_mil     import TransMIL
 
 
 # ── Registro: clave CLI → clase ───────────────────────────────────────────────
 MIL_REGISTRY: dict[str, type[BaseMIL]] = {
-    "max":                  MaxMIL,
-    "mean":                 MeanMIL,
+    "max-instance-level":   MaxInstanceMIL,
+    "max-bag-level":        MaxBagMIL,
+    "mean-instance-level":  MeanInstanceMIL,
+    "mean-bag-level":       MeanBagMIL,
     "abMIL-instance-level": AttentionMIL_InstanceLevel,
     "abMIL-bag-level":      AttentionMIL_BagLevel,
     "transMIL":             TransMIL,
@@ -50,6 +57,8 @@ MIL_REGISTRY: dict[str, type[BaseMIL]] = {
 
 # ── Estrategias bag-based (tienen clasificador propio, ignoran patch_logits) ──
 BAG_BASED_STRATEGIES: set[str] = {
+    "max-bag-level",
+    "mean-bag-level",
     "abMIL-bag-level",
     "transMIL",
 }
@@ -120,8 +129,10 @@ class MILAggregator(nn.Module):
 
 __all__ = [
     "BaseMIL",
-    "MaxMIL",
-    "MeanMIL",
+    "MaxInstanceMIL",
+    "MaxBagMIL",
+    "MeanInstanceMIL",
+    "MeanBagMIL",
     "AttentionMIL_InstanceLevel",
     "AttentionMIL_BagLevel",
     "TransMIL",
