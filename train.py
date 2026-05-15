@@ -131,6 +131,10 @@ ALL_ENCODERS = [
 ]
 
 ALL_MIL_MODES = [
+    "max-instance-level",
+    "mean-instance-level",
+    "max-bag-level",
+    "mean-bag-level",
     "abMIL-instance-level",
     "abMIL-bag-level",
     "transMIL",
