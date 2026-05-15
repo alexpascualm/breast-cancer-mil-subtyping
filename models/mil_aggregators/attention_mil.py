@@ -163,13 +163,13 @@ class AttentionMIL_BagLevel(BaseMIL):
 
         self.attention      = _GatedAttentionNet(embed_dim, hidden_dim)
         # Clasificador bag-level: g_φ del paper
-        # self.bag_classifier = nn.Linear(embed_dim, num_classes)
-        self.bag_classifier = nn.Sequential(
-                                    nn.Linear(embed_dim, embed_dim//2),
-                                    nn.ReLU(inplace=True),
-                                    nn.Dropout(0.2),
-                                    nn.Linear(embed_dim//2, num_classes)
-                                    )
+        self.bag_classifier = nn.Linear(embed_dim, num_classes)
+        # self.bag_classifier = nn.Sequential(
+        #                             nn.Linear(embed_dim, embed_dim//2),
+        #                             nn.ReLU(inplace=True),
+        #                             nn.Dropout(0.2),
+        #                             nn.Linear(embed_dim//2, num_classes)
+        #                             )
 
     def forward(
         self,

@@ -60,13 +60,13 @@ class WSIClassifier(nn.Module):
         
         # Clasificador de parche — solo para estrategias instance-based
         if not self.is_bag_based:
-            # self.patch_classifier = nn.Linear(embed_dim, num_classes)
-            self.patch_classifier = nn.Sequential(
-                                    nn.Linear(embed_dim, embed_dim//2),
-                                    nn.ReLU(inplace=True),
-                                    nn.Dropout(0.2),
-                                    nn.Linear(embed_dim//2, num_classes)
-                                    )         
+            self.patch_classifier = nn.Linear(embed_dim, num_classes)
+            # self.patch_classifier = nn.Sequential(
+            #                         nn.Linear(embed_dim, embed_dim//2),
+            #                         nn.ReLU(inplace=True),
+            #                         nn.Dropout(0.2),
+            #                         nn.Linear(embed_dim//2, num_classes)
+            #                         )         
         else:
             self.patch_classifier = None
 
