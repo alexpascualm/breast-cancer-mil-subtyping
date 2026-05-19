@@ -4,14 +4,7 @@ Carga los embeddings .h5 generados por extract_embeddings.py,
 aplica t-SNE y guarda un HTML interactivo listo para abrir en el navegador.
 
 Uso básico:
-    python run_tsne.py --patch_model dino --color_col ki67
-
-Nivel WSI (un punto por WSI, mean-pooling):
-    python run_tsne.py --patch_model dino --color_col grade --level wsi
-
-Nivel patch (un punto por parche, con muestreo opcional):
-    python run_tsne.py --patch_model uni --color_col subtype \
-        --level patch --sample_per_wsi 50
+    python tools/run_tsne.py --patch_model dino
 """
 
 import argparse
@@ -24,6 +17,8 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import normalize
+from sklearn.metrics import silhouette_score
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,7 +41,7 @@ def parse_args():
     parser.add_argument("--df_path",           type=str, default=bcnb_labels_df_path)
     parser.add_argument("--output_html",       type=str, default=None,
                         help="Ruta del HTML. Por defecto: "
-                             "/workspace/tools/tsne_results/<patch_model>/tsne_<color_col>_<level>.html")
+                             "/workspace/tools/tsne_results/<patch_model>/tsne_<color_col>.html")
 
     # Columna inicial para colorear (opcional)
     parser.add_argument("--color_col",         type=str, default='molecular_subtype',
@@ -58,14 +53,19 @@ def parse_args():
                         help="Columnas adicionales a mostrar en el tooltip "
                              "(además de wsi_id y color_col). None = todas las del df.")
 
-    # Granularidad
-    parser.add_argument("--level",             type=str, default="wsi",
-                        choices=["patch", "wsi"])
-    parser.add_argument("--sample_per_wsi",    type=int, default=None,
-                        help="(solo --level patch) Máx. parches a muestrear por WSI")
+    # PCA opcional antes de t-SNE
+    parser.add_argument("--use_pca",           action="store_true", default=False,
+                        help="Si se activa, aplica PCA antes de t-SNE. "
+                             "Si no, t-SNE se ejecuta directamente sobre la dimensión original.")
+    parser.add_argument("--pca_components",    type=int,   default=50,
+                        help="Nº de componentes PCA (solo relevante si --use_pca está activo).")
 
-    # t-SNE / PCA
-    parser.add_argument("--pca_components",    type=int,   default=50)
+    # Normalización de embeddings
+    parser.add_argument("--normalize",         action="store_true", default=False,
+                        help="Si se activa, normaliza los embeddings a norma L2 unitaria "
+                             "antes de cualquier reducción.")
+
+    # t-SNE
     parser.add_argument("--perplexity",        type=float, default=30.0)
     parser.add_argument("--n_iter",            type=int,   default=1000)
     parser.add_argument("--random_state",      type=int,   default=42)
@@ -77,8 +77,7 @@ def parse_args():
 # Carga
 # ---------------------------------------------------------------------------
 
-def load_embeddings(df, model_dir, level, sample_per_wsi,
-                    color_col, tooltip_cols):
+def load_embeddings(df, model_dir, color_col, tooltip_cols):
     SKIP_COLS = {"features"}
     if tooltip_cols is None:
         tooltip_cols = [c for c in df.columns if c not in SKIP_COLS]
@@ -100,56 +99,106 @@ def load_embeddings(df, model_dir, level, sample_per_wsi,
 
         try:
             with h5py.File(h5_path, "r") as h5:
-                embs   = h5["embeddings"][:]
-                coords = h5["coords"][:] if "coords" in h5 else None
+                embs = h5["embeddings"][:]
         except Exception as e:
             print(f"  [ERROR] {wsi_id}: {e}", flush=True)
             continue
 
-        n = len(embs)
+        # Mean-pooling a nivel WSI: un punto por WSI
+        emb_wsi = embs.mean(axis=0)
+        all_embs.append(emb_wsi)
 
-        if level == "wsi":
-            embs   = embs.mean(axis=0, keepdims=True)
-            coords = None
-            n      = 1
-        elif sample_per_wsi and n > sample_per_wsi:
-            idx    = np.random.choice(n, size=sample_per_wsi, replace=False)
-            embs   = embs[idx]
-            coords = coords[idx] if coords is not None else None
-            n      = sample_per_wsi
+        d = {"wsi_id": wsi_id}
+        for col in tooltip_cols:
+            d[col] = row[col]
+        all_meta.append(d)
 
-        all_embs.append(embs)
-
-        for i in range(n):
-            d = {"wsi_id": wsi_id}
-            if coords is not None:
-                d["coord_x"] = int(coords[i, 0])
-                d["coord_y"] = int(coords[i, 1])
-            for col in tooltip_cols:
-                d[col] = row[col]
-            all_meta.append(d)
-
-    embeddings = np.vstack(all_embs).astype(np.float32)
+    embeddings = np.stack(all_embs).astype(np.float32)
     meta_df    = pd.DataFrame(all_meta)
     return embeddings, meta_df, tooltip_cols
 
 
 # ---------------------------------------------------------------------------
-# Reducción
+# Pre-procesado + reducción
 # ---------------------------------------------------------------------------
 
-def reduce(embeddings, pca_components, perplexity, n_iter, random_state):
-    X = embeddings
-    if pca_components > 0 and X.shape[1] > pca_components:
-        print(f"PCA: {X.shape[1]}D → {pca_components}D …", flush=True)
-        pca = PCA(n_components=pca_components, random_state=random_state)
+def preprocess_and_reduce(embeddings, normalize_embs,
+                           use_pca, pca_components,
+                           perplexity, n_iter, random_state):
+    """
+    Devuelve (tsne_coords, pre_tsne_space) donde pre_tsne_space es el espacio
+    justo antes de pasar por t-SNE (usado para calcular el Silhouette Score).
+    """
+    X = embeddings.copy()
+
+    # 1. Normalización L2 opcional
+    if normalize_embs:
+        print("Normalizando embeddings (L2 unit norm) …", flush=True)
+        X = normalize(X, norm="l2")
+
+    # 2. PCA opcional
+    if use_pca:
+        n_comp = min(pca_components, X.shape[0], X.shape[1])
+        print(f"PCA: {X.shape[1]}D → {n_comp}D …", flush=True)
+        pca = PCA(n_components=n_comp, random_state=random_state)
         X   = pca.fit_transform(X)
         print(f"  Varianza explicada: {pca.explained_variance_ratio_.sum():.2%}", flush=True)
+    else:
+        print(f"PCA desactivada — t-SNE directo sobre {X.shape[1]}D …", flush=True)
 
-    print(f"t-SNE: {X.shape[1]}D → 2D  (n={X.shape[0]}, perplexity={perplexity}) …", flush=True)
+    # Guardamos el espacio pre-t-SNE para el Silhouette Score
+    pre_tsne_space = X.copy()
+
+    # 3. t-SNE
+    print(f"t-SNE: {X.shape[1]}D → 2D  (n={X.shape[0]}, perplexity={perplexity}) …",
+          flush=True)
     tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter,
                 random_state=random_state, verbose=1)
-    return tsne.fit_transform(X)
+    tsne_coords = tsne.fit_transform(X)
+
+    return tsne_coords, pre_tsne_space
+
+
+# ---------------------------------------------------------------------------
+# Silhouette Score (calculado en el espacio pre-t-SNE)
+# ---------------------------------------------------------------------------
+
+def compute_silhouette(pre_tsne_space, meta_df, color_col):
+    """
+    Calcula el Silhouette Score en el espacio de alta dimensión (pre-t-SNE).
+    Retorna un dict {col: score} para todas las columnas disponibles,
+    o solo para color_col si se prefiere.
+    """
+    if color_col not in meta_df.columns:
+        return {}
+
+    labels = meta_df[color_col].astype(str).values
+    unique = np.unique(labels)
+
+    if len(unique) < 2:
+        print(f"  Silhouette N/A para '{color_col}': solo {len(unique)} clase(s).", flush=True)
+        return {color_col: None}
+
+    # Subsampleo si hay demasiados puntos
+    MAX_N = 2000
+    n = len(pre_tsne_space)
+    if n > MAX_N:
+        idx    = np.random.default_rng(42).choice(n, size=MAX_N, replace=False)
+        X_sub  = pre_tsne_space[idx]
+        L_sub  = labels[idx]
+    else:
+        X_sub, L_sub = pre_tsne_space, labels
+
+    try:
+        score = silhouette_score(X_sub, L_sub, metric="euclidean")
+    except Exception as e:
+        print(f"  [WARN] Silhouette error para '{color_col}': {e}", flush=True)
+        score = None
+
+    print(f"  Silhouette Score (pre-t-SNE, '{color_col}'): "
+          f"{score:.4f}" if score is not None else "  Silhouette Score: N/A",
+          flush=True)
+    return {color_col: score}
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +220,40 @@ def _safe(v):
     return str(v)
 
 
-def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
-               patch_model, level, perplexity, n_iter):
+def build_html(tsne_coords, meta_df, pre_tsne_space,
+               color_col, tooltip_cols, silhouette_scores,
+               patch_model, perplexity, n_iter,
+               use_pca, normalize_embs):
 
     available_cols = [c for c in tooltip_cols if c in meta_df.columns and c != "wsi_id"]
     initial_col = color_col if (color_col and color_col in available_cols) else available_cols[0]
+
+    # Pre-calcular silhouettes para todas las columnas disponibles en pre-t-SNE
+    print("Calculando Silhouette Scores pre-t-SNE para todas las columnas …", flush=True)
+    all_sil = {}
+    for col in available_cols:
+        labels = meta_df[col].astype(str).values
+        unique = np.unique(labels)
+        if len(unique) < 2:
+            all_sil[col] = None
+            continue
+        MAX_N = 2000
+        n = len(pre_tsne_space)
+        if n > MAX_N:
+            idx   = np.random.default_rng(42).choice(n, size=MAX_N, replace=False)
+            X_sub = pre_tsne_space[idx]
+            L_sub = labels[idx]
+        else:
+            X_sub, L_sub = pre_tsne_space, labels
+        try:
+            score = float(silhouette_score(X_sub, L_sub, metric="euclidean"))
+        except Exception:
+            score = None
+        all_sil[col] = score
+        if score is not None:
+            print(f"    {col}: {score:.4f}", flush=True)
+        else:
+            print(f"    {col}: N/A", flush=True)
 
     points = []
     for i, (x, y) in enumerate(tsne_coords):
@@ -190,6 +268,18 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     cols_json        = json.dumps(available_cols)
     initial_col_json = json.dumps(initial_col)
     palette_json     = json.dumps(PALETTE)
+    sil_json         = json.dumps(all_sil)
+
+    # Build metadata tags
+    meta_tags = [f'<span class="meta-tag">perp: {perplexity}</span>',
+                 f'<span class="meta-tag">iter: {n_iter}</span>']
+    if use_pca:
+        meta_tags.append('<span class="meta-tag">PCA ✓</span>')
+    else:
+        meta_tags.append('<span class="meta-tag">no PCA</span>')
+    if normalize_embs:
+        meta_tags.append('<span class="meta-tag">L2 norm ✓</span>')
+    meta_tags_html = "\n  ".join(meta_tags)
 
     html = f"""<!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -214,7 +304,6 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     --accent2:    #7b5ea7;
     --radius:     6px;
     --shadow:     0 8px 24px rgba(0,0,0,.5);
-    --theme-icon: "☀️";
   }}
 
   /* ── Light theme ── */
@@ -229,10 +318,8 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     --accent2:    #6b3fa0;
     --radius:     6px;
     --shadow:     0 8px 24px rgba(0,0,0,.12);
-    --theme-icon: "🌙";
   }}
 
-  /* ── Transition for theme switch ── */
   body, .sidebar, header, #tooltip, .ctrl-btn, .col-select,
   .meta-item, .legend-item, .silhouette-bar-wrap {{
     transition: background-color .25s, border-color .25s, color .25s;
@@ -257,6 +344,7 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     background: var(--surface);
+    flex-wrap: wrap;
   }}
   header h1 {{
     font-family: 'IBM Plex Mono', monospace;
@@ -276,7 +364,6 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     padding: 2px 8px;
   }}
 
-  /* ── Theme toggle button ── */
   #btnTheme {{
     background: var(--surface2);
     border: 1px solid var(--border);
@@ -294,10 +381,7 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     flex-shrink: 0;
   }}
   #btnTheme:hover {{ border-color: var(--accent); }}
-  #btnTheme .theme-label {{
-    font-size: 11px;
-    color: var(--muted);
-  }}
+  #btnTheme .theme-label {{ font-size: 11px; color: var(--muted); }}
 
   .workspace {{
     display: flex;
@@ -339,7 +423,6 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     font-family: 'IBM Plex Mono', monospace;
   }}
 
-  /* ── Column selector ── */
   .col-select {{
     width: 100%;
     background: var(--bg);
@@ -374,10 +457,11 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
     color: var(--text);
     line-height: 1;
   }}
-  #silhouette-spinner {{
+  .sil-note-space {{
     font-size: 10px;
-    color: var(--muted);
+    color: var(--accent);
     font-family: 'IBM Plex Mono', monospace;
+    opacity: .7;
   }}
   .silhouette-bar-wrap {{
     background: var(--surface2);
@@ -488,7 +572,6 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
   }}
   .ctrl-btn:hover {{ border-color: var(--accent); color: var(--accent); }}
 
-  /* ── Scrollbar ── */
   .sidebar::-webkit-scrollbar {{ width: 4px; }}
   .sidebar::-webkit-scrollbar-track {{ background: transparent; }}
   .sidebar::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 2px; }}
@@ -498,9 +581,7 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
 
 <header>
   <h1>t-SNE &mdash; {patch_model}</h1>
-  <span class="meta-tag">level: {level}</span>
-  <span class="meta-tag">perp: {perplexity}</span>
-  <span class="meta-tag">iter: {n_iter}</span>
+  {meta_tags_html}
   <button id="btnTheme">
     <span id="themeIcon">☀️</span>
     <span class="theme-label" id="themeLabel">Light mode</span>
@@ -525,15 +606,15 @@ def build_html(tsne_coords, meta_df, color_col, tooltip_cols,
       <h2>Silhouette Score</h2>
       <div class="silhouette-row">
         <div class="silhouette-val" id="silVal">—</div>
-        <span id="silhouette-spinner">computing…</span>
+        <span class="sil-note-space">pre-t-SNE</span>
       </div>
       <div class="silhouette-bar-wrap">
         <div class="silhouette-bar" id="silBar"></div>
       </div>
       <div class="sil-range"><span>−1</span><span>0</span><span>+1</span></div>
       <div class="silhouette-note" style="margin-top:6px">
-        Measures cluster separation on t-SNE coords.<br>
-        Higher = better separation for this feature.
+        Computed in the pre-t-SNE space{' (post-PCA)' if use_pca else ' (original dims)'}.
+        Higher = better cluster separation for this feature.
       </div>
     </div>
 
@@ -570,6 +651,7 @@ const RAW         = {data_json};
 const COLS        = {cols_json};
 const PALETTE     = {palette_json};
 const INITIAL_COL = {initial_col_json};
+const SIL_SCORES  = {sil_json};   // pre-computed in pre-t-SNE space
 
 /* ══════════════════════════════════════════
    THEME TOGGLE
@@ -617,88 +699,28 @@ function applyCol(col) {{
   active     = new Set(Object.keys(colorMap));
   buildLegend();
   draw();
-  scheduleSilhouette(col);
+  updateSilhouette(col);
 }}
 
 /* ══════════════════════════════════════════
-   SILHOUETTE SCORE
-   Computed on t-SNE 2D coords, sampled ≤2000 pts
+   SILHOUETTE — pre-computed, instant update
 ══════════════════════════════════════════ */
-let silTimer = null;
+function updateSilhouette(col) {{
+  const score = SIL_SCORES[col];
+  const bar   = document.getElementById('silBar');
 
-function scheduleSilhouette(col) {{
-  document.getElementById('silhouette-spinner').style.display = 'inline';
-  document.getElementById('silVal').textContent = '—';
-  const bar = document.getElementById('silBar');
-  bar.style.width = '0%';
-  if (silTimer) clearTimeout(silTimer);
-  silTimer = setTimeout(() => computeSilhouette(col), 60);
-}}
-
-function computeSilhouette(col) {{
-  const MAX_N = 2000;
-  let pts = RAW.map(p => ({{ x: p.x, y: p.y, label: p.tip[col] ?? 'N/A' }}));
-
-  // Shuffle + sample if too large
-  if (pts.length > MAX_N) {{
-    for (let i = pts.length - 1; i > 0; i--) {{
-      const j = Math.floor(Math.random() * (i + 1));
-      [pts[i], pts[j]] = [pts[j], pts[i]];
-    }}
-    pts = pts.slice(0, MAX_N);
-  }}
-
-  const n      = pts.length;
-  const labels = [...new Set(pts.map(p => p.label))];
-
-  if (labels.length < 2) {{
+  if (score === null || score === undefined) {{
     document.getElementById('silVal').textContent = 'N/A';
-    document.getElementById('silhouette-spinner').style.display = 'none';
+    bar.style.width = '0%';
     return;
   }}
 
-  // Pre-index by label
-  const labelIdx = {{}};
-  labels.forEach(l => labelIdx[l] = []);
-  pts.forEach((p, i) => labelIdx[p.label].push(i));
-
-  let total = 0;
-  for (let i = 0; i < n; i++) {{
-    const li = pts[i].label;
-    if (labelIdx[li].length < 2) continue;
-
-    // a(i): mean intra-cluster distance
-    let sumA = 0;
-    for (const j of labelIdx[li]) {{
-      if (j === i) continue;
-      sumA += Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
-    }}
-    const a = sumA / (labelIdx[li].length - 1);
-
-    // b(i): min mean inter-cluster distance
-    let b = Infinity;
-    for (const l2 of labels) {{
-      if (l2 === li) continue;
-      let sumB = 0;
-      for (const j of labelIdx[l2])
-        sumB += Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
-      const mb = sumB / labelIdx[l2].length;
-      if (mb < b) b = mb;
-    }}
-
-    total += (b - a) / Math.max(a, b);
-  }}
-
-  const score = total / n;
-  // Map [-1, 1] → [0%, 100%] for the bar
   const pct   = ((score + 1) / 2 * 100).toFixed(1);
   const color = score > 0.5 ? '#06d6a0' : score > 0.2 ? '#f4a261' : '#e63946';
 
   document.getElementById('silVal').textContent = score.toFixed(4);
-  const bar = document.getElementById('silBar');
   bar.style.width           = pct + '%';
   bar.style.backgroundColor = color;
-  document.getElementById('silhouette-spinner').style.display = 'none';
 }}
 
 /* ══════════════════════════════════════════
@@ -897,9 +919,7 @@ def main():
         out_dir = os.path.join("/workspace/tools/tsne_results", args.patch_model)
         os.makedirs(out_dir, exist_ok=True)
         suffix  = args.color_col if args.color_col else "all"
-        args.output_html = os.path.join(
-            out_dir, f"tsne_{suffix}_{args.level}.html"
-        )
+        args.output_html = os.path.join(out_dir, f"tsne_{suffix}.html")
 
     df = create_file_label_df(
         images_path=args.images_folder,
@@ -915,8 +935,6 @@ def main():
     embeddings, meta_df, tooltip_cols = load_embeddings(
         df=df,
         model_dir=model_dir,
-        level=args.level,
-        sample_per_wsi=args.sample_per_wsi,
         color_col=args.color_col,
         tooltip_cols=args.tooltip_cols,
     )
@@ -926,8 +944,10 @@ def main():
         print("[ERROR] No se cargó ningún embedding.", flush=True)
         sys.exit(1)
 
-    tsne_coords = reduce(
-        embeddings,
+    tsne_coords, pre_tsne_space = preprocess_and_reduce(
+        embeddings=embeddings,
+        normalize_embs=args.normalize,
+        use_pca=args.use_pca,
         pca_components=args.pca_components,
         perplexity=args.perplexity,
         n_iter=args.n_iter,
@@ -937,12 +957,15 @@ def main():
     html = build_html(
         tsne_coords=tsne_coords,
         meta_df=meta_df,
+        pre_tsne_space=pre_tsne_space,
         color_col=args.color_col,
         tooltip_cols=tooltip_cols,
+        silhouette_scores={},          # ya se calcula internamente en build_html
         patch_model=args.patch_model,
-        level=args.level,
         perplexity=args.perplexity,
         n_iter=args.n_iter,
+        use_pca=args.use_pca,
+        normalize_embs=args.normalize,
     )
 
     with open(args.output_html, "w", encoding="utf-8") as f:

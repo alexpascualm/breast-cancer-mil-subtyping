@@ -65,7 +65,7 @@ def parse_args():
                         help="Extractor de características")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode", type=str, default="abMIL-bag-level",
-                        choices=["max", "mean", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
+                        choices=["max-instance-level", "max-bag-level", "mean-instance-level", "mean-bag-level", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
     parser.add_argument("--patch_resize_size", type=int, default=224,
                         help="Dimensiones de reescalado de los parches")
     parser.add_argument("--precomputed_embeddings_folder", type=str, default=None,
