@@ -49,7 +49,7 @@ def parse_args():
                              "/workspace/tools/tsne_results/<patch_model>/tsne_<color_col>_<level>.html")
 
     # Columna inicial para colorear (opcional)
-    parser.add_argument("--color_col",         type=str, default=None,
+    parser.add_argument("--color_col",         type=str, default='molecular_subtype',
                         choices=["molecular_subtype", "er", "pr", "her2", "ki67"],
                         help="Columna inicial para colorear (opcional, se puede cambiar en el HTML)")
 

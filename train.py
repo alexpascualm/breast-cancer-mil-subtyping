@@ -590,12 +590,13 @@ def run_kfolds(
                     best_val_epoch   = epoch
                     best_val_metrics = val_metrics      # guardar métricas de la mejor época
                     no_improve       = 0
+                    msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f}) ======================================================"
+                    print(msg, flush=True)
+                    with open(log_path, "a") as f:
+                        f.write(msg + "\n")
                     if args.save_models:
                         accelerator.save_state(best_model_path)
-                        msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f})"
-                        print(msg, flush=True)
-                        with open(log_path, "a") as f:
-                            f.write(msg + "\n")
+                        
                 else:
                     no_improve += 1
                     if no_improve >= args.patience:
