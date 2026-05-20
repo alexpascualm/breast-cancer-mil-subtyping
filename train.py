@@ -140,6 +140,17 @@ ALL_MIL_MODES = [
     "transMIL",
 ]
 
+ALL_LEARNING_RATES = [
+    1e-3,
+    1e-4,
+    1e-5,
+]
+
+ALL_WEIGHT_DECAYS = [
+    1e-3,
+    1e-4,
+]
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PASO 1 · SPLIT INICIAL DEV / TEST
@@ -640,15 +651,6 @@ def run_kfolds(
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
-# Coordina el flujo:
-#   1. Split inicial dev/test  (prepare_task_data)
-#   2. Para cada tarea × encoder × MIL:
-#      a. Configuración K-Fold + carga de datasets  (prepare_task)
-#      b. Entrenamiento K-Fold                       (run_kfolds)
-#
-# El flujo se detiene tras la validación cruzada.
-# La fase de re-entrenamiento sobre dev completo + evaluación en test
-# queda pendiente de implementación.
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -667,7 +669,7 @@ if __name__ == "__main__":
     dev_df, test_df = prepare_task_data(args)
 
     if not args.run_all_configs:
-        # ── Modo single: una tarea, un encoder, un MIL ────────────────────────
+        # ── Modo single: una tarea, un encoder, un MIL, un set de parámetros ────────────────────────
         df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
             args, dev_df, task=args.task, patch_model=args.patch_model,
         )
@@ -685,16 +687,15 @@ if __name__ == "__main__":
         )
 
     else:
-        # ── Modo multi-configuración: todas las combinaciones tarea × encoder × MIL ─
-        # Orden de iteración: tarea → encoder → MIL
-        #   · prepare_task se llama solo cuando cambia la tarea (modo imagen)
-        #     o cuando cambia tarea O encoder (modo precomputed, porque las rutas de embeddings dependen del encoder).
-        #   · El bucle MIL más interno nunca recarga datasets.
+        # ── Modo multi-configuración: todas las combinaciones tarea × encoder × MIL x parámetros ─
+        # Orden de iteración: tarea → encoder → MIL → parámetros.
         encoder_mil_combos = list(itertools.product(ALL_ENCODERS, ALL_MIL_MODES))
-        total = len(ALL_TASKS) * len(encoder_mil_combos)
+        lr_wd_combos       = list(itertools.product(ALL_LEARNING_RATES, ALL_WEIGHT_DECAYS))
+        total = len(ALL_TASKS) * len(encoder_mil_combos) * len(lr_wd_combos)
         print(
             f"\nModo run_all_configs: {len(ALL_TASKS)} tarea(s) × "
-            f"{len(encoder_mil_combos)} combinaciones encoder×MIL = "
+            f"{len(encoder_mil_combos)} combinaciones encoder×MIL × "
+            f"{len(lr_wd_combos)} combinaciones lr×wd = "
             f"{total} experimentos",
             flush=True,
         )
@@ -706,89 +707,86 @@ if __name__ == "__main__":
 
             if precomputed:
                 # ── Embeddings precomputados: recargar por tarea × encoder ───
-                # Los datasets cambian tanto si cambia la tarea (etiquetas)
-                # como si cambia el encoder (rutas de embeddings distintas).
-                for patch_model, mil_mode in encoder_mil_combos:
-
-                    # Cargar datasets solo al inicio de cada encoder nuevo.
-                    # Como encoder_mil_combos itera encoder × MIL en orden,
-                    # detectamos el cambio de encoder comparando con el anterior.
-                    if mil_mode == ALL_MIL_MODES[0]:
-                        # Primera vez que aparece este encoder para esta tarea
-                        df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
-                            args, dev_df, task=task, patch_model=patch_model,
-                        )
-
-                    exp_counter += 1
-                    print(
-                        f"\n{'='*60}\n"
-                        f"Experimento {exp_counter}/{total}: "
-                        f"task={task}  encoder={patch_model}  MIL={mil_mode}\n"
-                        f"{'='*60}",
-                        flush=True,
+                for patch_model in ALL_ENCODERS:
+                    df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+                        args, dev_df, task=task, patch_model=patch_model,
                     )
 
-                    exp_args                      = copy.deepcopy(args)
-                    exp_args.task                 = task
-                    exp_args.patch_model          = patch_model
-                    exp_args.mil_aggregation_mode = mil_mode
+                    for mil_mode in ALL_MIL_MODES:
+                        for lr, wd in lr_wd_combos:
+                            exp_counter += 1
+                            print(
+                                f"\n{'='*60}\n"
+                                f"Experimento {exp_counter}/{total}: "
+                                f"task={task}  encoder={patch_model}  MIL={mil_mode}  "
+                                f"lr={lr}  wd={wd}\n"
+                                f"{'='*60}",
+                                flush=True,
+                            )
 
-                    run_kfolds(
-                        df_task              = df_task,
-                        fold_indices         = fold_indices,
-                        base_datasets        = base_datasets,
-                        accelerator          = accelerator,
-                        device               = device,
-                        args                 = exp_args,
-                        kfold_report_str     = kfold_report_str,
-                        task                 = task,
-                        patch_model          = patch_model,
-                        mil_aggregation_mode = mil_mode,
-                    )
+                            exp_args                      = copy.deepcopy(args)
+                            exp_args.task                 = task
+                            exp_args.patch_model          = patch_model
+                            exp_args.mil_aggregation_mode = mil_mode
+                            exp_args.learning_rate        = lr
+                            exp_args.weight_decay         = wd
 
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                            run_kfolds(
+                                df_task              = df_task,
+                                fold_indices         = fold_indices,
+                                base_datasets        = base_datasets,
+                                accelerator          = accelerator,
+                                device               = device,
+                                args                 = exp_args,
+                                kfold_report_str     = kfold_report_str,
+                                task                 = task,
+                                patch_model          = patch_model,
+                                mil_aggregation_mode = mil_mode,
+                            )
+
+                            torch.cuda.empty_cache()
+                            gc.collect()
 
             else:
                 # ── Modo imagen: recargar solo cuando cambia la tarea ─────────
-                # El encoder se aplica en cada forward, así que los datasets
-                # (parches en disco) son idénticos para todos los encoders
-                # de una misma tarea.
                 df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
                     args, dev_df, task=task, patch_model=ALL_ENCODERS[0],
                 )
 
                 for patch_model, mil_mode in encoder_mil_combos:
+                    for lr, wd in lr_wd_combos:
+                        exp_counter += 1
+                        print(
+                            f"\n{'='*60}\n"
+                            f"Experimento {exp_counter}/{total}: "
+                            f"task={task}  encoder={patch_model}  MIL={mil_mode}  "
+                            f"lr={lr}  wd={wd}\n"
+                            f"{'='*60}",
+                            flush=True,
+                        )
 
-                    exp_counter += 1
-                    print(
-                        f"\n{'='*60}\n"
-                        f"Experimento {exp_counter}/{total}: "
-                        f"task={task}  encoder={patch_model}  MIL={mil_mode}\n"
-                        f"{'='*60}",
-                        flush=True,
-                    )
+                        exp_args                      = copy.deepcopy(args)
+                        exp_args.task                 = task
+                        exp_args.patch_model          = patch_model
+                        exp_args.mil_aggregation_mode = mil_mode
+                        exp_args.learning_rate        = lr
+                        exp_args.weight_decay         = wd
 
-                    exp_args                      = copy.deepcopy(args)
-                    exp_args.task                 = task
-                    exp_args.patch_model          = patch_model
-                    exp_args.mil_aggregation_mode = mil_mode
+                        run_kfolds(
+                            df_task              = df_task,
+                            fold_indices         = fold_indices,
+                            base_datasets        = base_datasets,
+                            accelerator          = accelerator,
+                            device               = device,
+                            args                 = exp_args,
+                            kfold_report_str     = kfold_report_str,
+                            task                 = task,
+                            patch_model          = patch_model,
+                            mil_aggregation_mode = mil_mode,
+                        )
 
-                    run_kfolds(
-                        df_task              = df_task,
-                        fold_indices         = fold_indices,
-                        base_datasets        = base_datasets,
-                        accelerator          = accelerator,
-                        device               = device,
-                        args                 = exp_args,
-                        kfold_report_str     = kfold_report_str,
-                        task                 = task,
-                        patch_model          = patch_model,
-                        mil_aggregation_mode = mil_mode,
-                    )
-
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                        torch.cuda.empty_cache()
+                        gc.collect()
 
         print(
             f"\n{'='*60}\n"
