@@ -229,30 +229,34 @@ def prepare_task_data(args) -> tuple:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PASO 2 · CONFIGURACIÓN DE VALIDACIÓN
-# Filtra dev_df para la tarea concreta y aplica make_kfold_splits.
-# Devuelve únicamente los fold_indices y el resumen de proporciones.
-# NO construye datasets, NO lanza entrenamiento.
+# Filtra dev_df para la tarea concreta, aplica make_kfold_splits y carga los datasets base (uno por fold).
+# Devuelve fold_indices, el resumen de proporciones y los datasets base.
+# NO construye dataloaders, NO lanza entrenamiento.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def prepare_task(args, dev_df, task: str) -> str:
+def prepare_task(args, dev_df, task: str, patch_model: str) -> tuple:
     """
-    Prepara la partición K-Fold sobre el conjunto de desarrollo para una tarea.
+    Prepara la partición K-Fold y carga los datasets base para una tarea.
 
-    Recibe exclusivamente `dev_df` (nunca el test set) y aplica la lógica de
-    make_kfold_splits para generar los índices de validación cruzada.
+    Recibe exclusivamente `dev_df` (nunca el test set), aplica make_kfold_splits
+    para generar los índices de validación cruzada y construye un dataset base
+    por fold.
 
     Args
     ----
-    args    : Namespace con los argumentos de línea de comandos.
-    dev_df  : pd.DataFrame con las muestras de desarrollo (salida de prepare_task_data).
-    task    : str — nombre de la tarea / columna de etiquetas.
+    args        : Namespace con los argumentos de línea de comandos.
+    dev_df      : pd.DataFrame con las muestras de desarrollo.
+    task        : str — nombre de la tarea / columna de etiquetas.
+    patch_model : str — nombre del encoder; necesario para resolver la carpeta
+                  de embeddings precomputados cuando aplica.
 
     Returns
     -------
+    df_task          : pd.DataFrame filtrado para la tarea (solo dev).
     fold_indices     : lista de k np.ndarray con los índices posicionales de
                        cada fold sobre df_task.
-    kfold_report_str : str — descripción de las proporciones utilizadas en
-                       cada fold (train / val).
+    kfold_report_str : str — descripción de las proporciones de cada fold.
+    base_datasets    : lista de k datasets (uno por fold).
     """
     print(f"\n{'='*60}", flush=True)
     print(f"Configurando K-Fold para tarea: '{task}'", flush=True)
@@ -264,8 +268,6 @@ def prepare_task(args, dev_df, task: str) -> str:
     print(f"Distribución:\n{df_task[task].value_counts()}", flush=True)
 
     # Partición K-Fold estratificada por grupo de paciente
-    # Devuelve los índices de cada fold y el reporte de proporciones.
-    # En este paso NO se construyen datasets ni se lanza entrenamiento.
     fold_indices, kfold_report_str = make_kfold_splits(
         df_task,
         label_col=task,
@@ -273,7 +275,36 @@ def prepare_task(args, dev_df, task: str) -> str:
         k=args.kfold,
     )
 
-    return df_task, fold_indices, kfold_report_str
+    # ── Construir datasets base (uno por fold) ────────────────────────────────
+    precomputed = args.precomputed_embeddings_folder is not None
+    emb_folder = (
+        os.path.join(args.precomputed_embeddings_folder, patch_model)
+        if precomputed else None
+    )
+
+    def _make_base_dataset(idx):
+        """Construye un dataset para los índices posicionales `idx`."""
+        if emb_folder:
+            return Embeddings_WSI_Dataset(
+                df_task, idx, task=task,
+                embeddings_folder=emb_folder,
+                load_on_demand=args.load_on_demand)
+        return Patches_WSI_Dataset(
+            df_task, idx, task=task,
+            patch_resize_size=args.patch_resize_size,
+            load_on_demand=args.load_on_demand)
+
+    k = len(fold_indices)
+    t0 = time.time()
+    print(f"Cargando {k} datasets base ...", flush=True)
+    base_datasets = []
+    for fold_i, idx in enumerate(fold_indices):
+        ds = _make_base_dataset(idx)
+        base_datasets.append(ds)
+        print(f"  Fold base {fold_i}: {len(ds)} WSIs", flush=True)
+    print(f"Tiempo de carga: {time.time() - t0:.1f}s", flush=True)
+
+    return df_task, fold_indices, kfold_report_str, base_datasets
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -287,6 +318,7 @@ def prepare_task(args, dev_df, task: str) -> str:
 def run_kfolds(
     df_task,
     fold_indices,
+    base_datasets,
     accelerator,
     device,
     args,
@@ -300,6 +332,9 @@ def run_kfolds(
 
     Opera exclusivamente sobre los folds de desarrollo (train y validación).
     No existe ninguna referencia al test set original en este flujo.
+
+    Recibe `base_datasets` ya construidos (uno por fold) desde `prepare_task`.
+    En cada iteración solo instancia los DataLoaders a partir de ellos.
 
     Asignación de folds en cada iteración i (0-indexado):
         - val   ← fold  i
@@ -330,6 +365,7 @@ def run_kfolds(
     df_task              : pd.DataFrame filtrado para la tarea (solo dev).
     fold_indices         : lista de k np.ndarray con índices posicionales de
                            cada fold sobre df_task.
+    base_datasets        : lista de k datasets preconstruidos (uno por fold).
     accelerator          : Accelerator de HuggingFace.
     device               : torch.device.
     args                 : Namespace con todos los argumentos.
@@ -340,33 +376,6 @@ def run_kfolds(
     """
     precomputed = args.precomputed_embeddings_folder is not None
     k = len(fold_indices)
-
-    # ── Construir datasets base (uno por fold) ────────────────────────────────
-    emb_folder = (
-        os.path.join(args.precomputed_embeddings_folder, patch_model)
-        if precomputed else None
-    )
-
-    def _make_base_dataset(idx):
-        """Construye un dataset para los índices posicionales `idx`."""
-        if emb_folder:
-            return Embeddings_WSI_Dataset(
-                df_task, idx, task=task,
-                embeddings_folder=emb_folder,
-                load_on_demand=args.load_on_demand)
-        return Patches_WSI_Dataset(
-            df_task, idx, task=task,
-            patch_resize_size=args.patch_resize_size,
-            load_on_demand=args.load_on_demand)
-
-    t0 = time.time()
-    print(f"Cargando {k} datasets base ...", flush=True)
-    base_datasets = []
-    for fold_i, idx in enumerate(fold_indices):
-        ds = _make_base_dataset(idx)
-        base_datasets.append(ds)
-        print(f"  Fold base {fold_i}: {len(ds)} WSIs", flush=True)
-    print(f"Tiempo de carga: {time.time() - t0:.1f}s", flush=True)
 
     # ── Carpeta raíz de este experimento ──────────────────────────────────────
     # Almacenamiento aislado: results/experiments/{experiment_path}/
@@ -634,8 +643,8 @@ def run_kfolds(
 # Coordina el flujo:
 #   1. Split inicial dev/test  (prepare_task_data)
 #   2. Para cada tarea × encoder × MIL:
-#      a. Configuración K-Fold sobre dev  (prepare_task)
-#      b. Entrenamiento K-Fold             (run_kfolds)
+#      a. Configuración K-Fold + carga de datasets  (prepare_task)
+#      b. Entrenamiento K-Fold                       (run_kfolds)
 #
 # El flujo se detiene tras la validación cruzada.
 # La fase de re-entrenamiento sobre dev completo + evaluación en test
@@ -659,12 +668,13 @@ if __name__ == "__main__":
 
     if not args.run_all_configs:
         # ── Modo single: una tarea, un encoder, un MIL ────────────────────────
-        df_task, fold_indices, kfold_report_str = prepare_task(
-            args, dev_df, task=args.task,
+        df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+            args, dev_df, task=args.task, patch_model=args.patch_model,
         )
         run_kfolds(
             df_task              = df_task,
             fold_indices         = fold_indices,
+            base_datasets        = base_datasets,
             accelerator          = accelerator,
             device               = device,
             args                 = args,
@@ -675,7 +685,11 @@ if __name__ == "__main__":
         )
 
     else:
-        # ── Modo multi-configuración: todas las combinaciones MIL × encoder ───
+        # ── Modo multi-configuración: todas las combinaciones tarea × encoder × MIL ─
+        # Orden de iteración: tarea → encoder → MIL
+        #   · prepare_task se llama solo cuando cambia la tarea (modo imagen)
+        #     o cuando cambia tarea O encoder (modo precomputed, porque las rutas de embeddings dependen del encoder).
+        #   · El bucle MIL más interno nunca recarga datasets.
         encoder_mil_combos = list(itertools.product(ALL_ENCODERS, ALL_MIL_MODES))
         total = len(ALL_TASKS) * len(encoder_mil_combos)
         print(
@@ -685,65 +699,96 @@ if __name__ == "__main__":
             flush=True,
         )
 
+        precomputed = args.precomputed_embeddings_folder is not None
         exp_counter = 0
+
         for task in ALL_TASKS:
-            # Los folds dependen solo de la tarea, no del encoder.
-            # Cacheamos el resultado de prepare_task para reutilizarlo
-            # en todas las combinaciones de encoder × MIL de esta tarea.
-            cached_task_data: dict = {}
 
-            for patch_model, mil_mode in encoder_mil_combos:
-                # ──────────────────────────────────────────────────────────────
-                # Si usamos embeddings precomputados:
-                #   cada encoder necesita recargar datasets porque embed_dim cambia
-                #
-                # Si NO usamos embeddings:
-                #   podemos reutilizar datasets entre encoders para una misma tarea, porque el encoder se aplica dinámicamente en cada forward.
-                # ──────────────────────────────────────────────────────────────
-                cache_key = (
-                    patch_model
-                    if args.precomputed_embeddings_folder is not None
-                    else "shared"
-                )
+            if precomputed:
+                # ── Embeddings precomputados: recargar por tarea × encoder ───
+                # Los datasets cambian tanto si cambia la tarea (etiquetas)
+                # como si cambia el encoder (rutas de embeddings distintas).
+                for patch_model, mil_mode in encoder_mil_combos:
 
-                if cache_key not in cached_task_data:
-                    df_task, fold_indices, kfold_report_str = prepare_task(
-                        args, dev_df, task=task,
+                    # Cargar datasets solo al inicio de cada encoder nuevo.
+                    # Como encoder_mil_combos itera encoder × MIL en orden,
+                    # detectamos el cambio de encoder comparando con el anterior.
+                    if mil_mode == ALL_MIL_MODES[0]:
+                        # Primera vez que aparece este encoder para esta tarea
+                        df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+                            args, dev_df, task=task, patch_model=patch_model,
+                        )
+
+                    exp_counter += 1
+                    print(
+                        f"\n{'='*60}\n"
+                        f"Experimento {exp_counter}/{total}: "
+                        f"task={task}  encoder={patch_model}  MIL={mil_mode}\n"
+                        f"{'='*60}",
+                        flush=True,
                     )
-                    cached_task_data[cache_key] = (df_task, fold_indices, kfold_report_str)
 
-                df_task, fold_indices, kfold_report_str = cached_task_data[cache_key]
+                    exp_args                      = copy.deepcopy(args)
+                    exp_args.task                 = task
+                    exp_args.patch_model          = patch_model
+                    exp_args.mil_aggregation_mode = mil_mode
 
-                exp_counter += 1
-                print(
-                    f"\n{'='*60}\n"
-                    f"Experimento {exp_counter}/{total}: "
-                    f"task={task}  encoder={patch_model}  MIL={mil_mode}\n"
-                    f"{'='*60}",
-                    flush=True,
+                    run_kfolds(
+                        df_task              = df_task,
+                        fold_indices         = fold_indices,
+                        base_datasets        = base_datasets,
+                        accelerator          = accelerator,
+                        device               = device,
+                        args                 = exp_args,
+                        kfold_report_str     = kfold_report_str,
+                        task                 = task,
+                        patch_model          = patch_model,
+                        mil_aggregation_mode = mil_mode,
+                    )
+
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+            else:
+                # ── Modo imagen: recargar solo cuando cambia la tarea ─────────
+                # El encoder se aplica en cada forward, así que los datasets
+                # (parches en disco) son idénticos para todos los encoders
+                # de una misma tarea.
+                df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+                    args, dev_df, task=task, patch_model=ALL_ENCODERS[0],
                 )
 
-                # Clonar args para no contaminar entre experimentos
-                exp_args                      = copy.deepcopy(args)
-                exp_args.task                 = task
-                exp_args.patch_model          = patch_model
-                exp_args.mil_aggregation_mode = mil_mode
+                for patch_model, mil_mode in encoder_mil_combos:
 
-                # PASO 2 + 3: validación cruzada sobre dev
-                run_kfolds(
-                    df_task              = df_task,
-                    fold_indices         = fold_indices,
-                    accelerator          = accelerator,
-                    device               = device,
-                    args                 = exp_args,
-                    kfold_report_str     = kfold_report_str,
-                    task                 = task,
-                    patch_model          = patch_model,
-                    mil_aggregation_mode = mil_mode,
-                )
+                    exp_counter += 1
+                    print(
+                        f"\n{'='*60}\n"
+                        f"Experimento {exp_counter}/{total}: "
+                        f"task={task}  encoder={patch_model}  MIL={mil_mode}\n"
+                        f"{'='*60}",
+                        flush=True,
+                    )
 
-                torch.cuda.empty_cache()
-                gc.collect()
+                    exp_args                      = copy.deepcopy(args)
+                    exp_args.task                 = task
+                    exp_args.patch_model          = patch_model
+                    exp_args.mil_aggregation_mode = mil_mode
+
+                    run_kfolds(
+                        df_task              = df_task,
+                        fold_indices         = fold_indices,
+                        base_datasets        = base_datasets,
+                        accelerator          = accelerator,
+                        device               = device,
+                        args                 = exp_args,
+                        kfold_report_str     = kfold_report_str,
+                        task                 = task,
+                        patch_model          = patch_model,
+                        mil_aggregation_mode = mil_mode,
+                    )
+
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
         print(
             f"\n{'='*60}\n"
