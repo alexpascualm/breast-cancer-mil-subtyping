@@ -33,7 +33,7 @@ from utils.train_utils import (
     stratified_dev_test_split,
 )
 from utils.metrics_utils import log_epoch_metrics, save_metrics_to_csv
-from config import bcnb_images_folder_path, bcnb_labels_df_path, results_folder_path
+from config import bcnb_images_folder_path, bcnb_labels_df_path, bcnb_embeddings_path, results_folder_path
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ def parse_args():
                         choices=["max-instance-level", "max-bag-level", "mean-instance-level", "mean-bag-level", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
     parser.add_argument("--patch_resize_size", type=int, default=224,
                         help="Dimensiones de reescalado de los parches")
-    parser.add_argument("--precomputed_embeddings_folder", type=str, default=None,
+    parser.add_argument("--precomputed_embeddings_folder", type=str, default=bcnb_embeddings_path,
                         help="Si se especifica, usa embeddings precomputados en lugar "
                              "de procesar imágenes con el encoder en cada época.")
 
@@ -107,7 +107,7 @@ def parse_args():
     # ── Modo multi-configuración ───────────────────────────────────────────────
     parser.add_argument("--run_all_configs", action="store_true",
                         help="Ejecuta automáticamente todas las combinaciones "
-                             "encoder x MIL x Tarea definidas en las listas ALL_ENCODERS, ALL_MIL_MODES y ALL_TASKS.")
+                             "Tarea definidas x encoder x MIL x hiperparámetros  en las listas ALL_X")
 
     return parser.parse_args()
 
