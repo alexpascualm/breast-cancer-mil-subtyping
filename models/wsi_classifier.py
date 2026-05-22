@@ -8,11 +8,11 @@ Modelo principal que combina:
 
 Dos modos de clasificación:
 
-    INSTANCE-BASED (max, mean, attentionMIL):
+    INSTANCE-BASED (max-instance-level, mean-instance-level, abMIL-instance-level):
         patch → encoder → embedding → clasificador_parche → logit_parche
         logits_parche x N → MIL → logit_WSI
 
-    BAG-BASED (transMIL):
+    BAG-BASED (max-bag-level, mean-bag-level, abMIL-bag-level, transMIL):
         patch → encoder → embedding
         embeddings x N → MIL (con clasificador interno) → logit_WSI
 """
