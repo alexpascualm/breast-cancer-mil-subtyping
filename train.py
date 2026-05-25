@@ -158,7 +158,7 @@ ALL_WEIGHT_DECAYS = [
 # Guarda físicamente ambos splits en results/ antes de continuar.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def prepare_task_data(args) -> tuple:
+def make_initial_data_split(args) -> tuple:
     """
     Construye el DataFrame maestro y realiza el split estratificado dev/test.
 
@@ -245,7 +245,7 @@ def prepare_task_data(args) -> tuple:
 # NO construye dataloaders, NO lanza entrenamiento.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def prepare_task(args, dev_df, task: str, patch_model: str) -> tuple:
+def prepare_task_data(args, dev_df, task: str, patch_model: str) -> tuple:
     """
     Prepara la partición K-Fold y carga los datasets base para una tarea.
 
@@ -344,7 +344,7 @@ def run_kfolds(
     Opera exclusivamente sobre los folds de desarrollo (train y validación).
     No existe ninguna referencia al test set original en este flujo.
 
-    Recibe `base_datasets` ya construidos (uno por fold) desde `prepare_task`.
+    Recibe `base_datasets` ya construidos (uno por fold) desde `prepare_task_data`.
     En cada iteración solo instancia los DataLoaders a partir de ellos.
 
     Asignación de folds en cada iteración i (0-indexado):
@@ -666,11 +666,11 @@ if __name__ == "__main__":
     print(f"Dispositivo: {device}", flush=True)
 
     # ── PASO 1: split inicial dev / test ──────────────────────────────────────
-    dev_df, test_df = prepare_task_data(args)
+    dev_df, test_df = make_initial_data_split(args)
 
     if not args.run_all_configs:
         # ── Modo single: una tarea, un encoder, un MIL, un set de parámetros ────────────────────────
-        df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+        df_task, fold_indices, kfold_report_str, base_datasets = prepare_task_data(
             args, dev_df, task=args.task, patch_model=args.patch_model,
         )
         run_kfolds(
@@ -708,7 +708,7 @@ if __name__ == "__main__":
             if precomputed:
                 # ── Embeddings precomputados: recargar por tarea × encoder ───
                 for patch_model in ALL_ENCODERS:
-                    df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+                    df_task, fold_indices, kfold_report_str, base_datasets = prepare_task_data(
                         args, dev_df, task=task, patch_model=patch_model,
                     )
 
@@ -749,7 +749,7 @@ if __name__ == "__main__":
 
             else:
                 # ── Modo imagen: recargar solo cuando cambia la tarea ─────────
-                df_task, fold_indices, kfold_report_str, base_datasets = prepare_task(
+                df_task, fold_indices, kfold_report_str, base_datasets = prepare_task_data(
                     args, dev_df, task=task, patch_model=ALL_ENCODERS[0],
                 )
 
