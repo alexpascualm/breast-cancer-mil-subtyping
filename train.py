@@ -128,7 +128,7 @@ ALL_TASKS = [
 ALL_ENCODERS = [
     "uni",
     "dino",
-    "keep",
+    # "keep",
 ]
 
 ALL_MIL_MODES = [
@@ -694,9 +694,9 @@ if __name__ == "__main__":
         lr_wd_combos       = list(itertools.product(ALL_LEARNING_RATES, ALL_WEIGHT_DECAYS))
         total = len(ALL_TASKS) * len(encoder_mil_combos) * len(lr_wd_combos)
         print(
-            f"\nModo run_all_configs: {len(ALL_TASKS)} tarea(s) × "
-            f"{len(encoder_mil_combos)} combinaciones encoder×MIL × "
-            f"{len(lr_wd_combos)} combinaciones lr×wd = "
+            f"\nModo run_all_configs: {len(ALL_TASKS)} tarea(s) x "
+            f"{len(encoder_mil_combos)} combinaciones encoder x MIL x "
+            f"{len(lr_wd_combos)} combinaciones lr x wd = "
             f"{total} experimentos",
             flush=True,
         )

@@ -32,6 +32,9 @@ python extract_embeddings.py --patch_model uni  --output_folder /data/BCNB/proce
 
 docker run --name apasmel_breast_0 -it --ipc=host --gpus 'device=0' -v /home/apasmel/nas_alejandro_pascual/WSI-Breast-Cancer-Molecular-Subtyping:/workspace -v /mnt/ART-HDD-001:/data  nvcr.io/nvidia/pytorch:25.03-py3
 
+# Entrenamiento
+
+python train.py --run_all_configs --results_path /workspace/results/experiment
 
 # Tmux
 

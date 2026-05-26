@@ -111,10 +111,13 @@ class TransMIL(BaseMIL):
         self.dim_model = dim_model
 
         # Proyección de entrada: embed_dim → dim_model
-        self.input_proj = nn.Sequential(
-            nn.Linear(embed_dim, dim_model),
-            nn.ReLU(inplace=True),
-        )
+        if dim_model != embed_dim:
+            self.input_proj = nn.Sequential(
+                nn.Linear(embed_dim, dim_model),
+                nn.ReLU(inplace=True),
+            )
+        else:
+            self.input_proj = nn.Identity()
 
         # CLS token aprendible
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim_model))
@@ -130,14 +133,7 @@ class TransMIL(BaseMIL):
         self.norm = nn.LayerNorm(dim_model)
 
         # Clasificador de WSI (sobre CLS token)
-        self.bag_classifier = nn.Linear(dim_model, num_classes)
-        # self.bag_classifier = nn.Sequential(
-        #                             nn.Linear(dim_model, dim_model//2),
-        #                             nn.ReLU(inplace=True),
-        #                             nn.Dropout(0.2),
-        #                             nn.Linear(dim_model//2, num_classes)
-        #                             ) 
-
+        self.bag_classifier = nn.Sequential(nn.Dropout(0.2), nn.Linear(dim_model, num_classes))
     # ------------------------------------------------------------------
 
     def forward(
@@ -169,6 +165,7 @@ class TransMIL(BaseMIL):
         pad_len = _H * _W - N
         if pad_len > 0:
             h = torch.cat([h, h[:, :pad_len, :]], dim=1) # opción original: repite los primeros tokens para rellenar
+            
             # pad_tensor = torch.zeros((1, pad_len, h.size(-1)),device=h.device,dtype=h.dtype)
             # h = torch.cat([h, pad_tensor], dim=1) # opción alternativa: rellena con ceros
     
@@ -192,4 +189,4 @@ class TransMIL(BaseMIL):
         # 8. Clasificador de WSI
         wsi_logit = self.bag_classifier(cls_out).squeeze(0)   # (num_classes,)
 
-        return wsi_logit, None
+        return wsi_logit, None # TransMIL no produce pesos de atención por parche, podría implementarse una aproximación con atención cruzada entre CLS y parches.
