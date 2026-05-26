@@ -11,23 +11,19 @@ Para añadir un nuevo encoder:
 from models.patch_encoders.base_encoder   import BasePatchEncoder
 from models.patch_encoders.dino_encoder   import DINOEncoder
 from models.patch_encoders.uni_encoder    import UNIEncoder
-# from models.patch_encoders.conch_encoder  import CONCHEncoder
-# from models.patch_encoders.keep_encoder   import KEEPEncoder
+from models.patch_encoders.keep_encoder   import KEEPEncoder
 
 # Registro: clave CLI → clase
 ENCODER_REGISTRY: dict[str, type[BasePatchEncoder]] = {
     "dino":  DINOEncoder,
     "uni":   UNIEncoder,
-    # "uni2":  UNIEncoder,
-    # "conch": CONCHEncoder,
-    # "keep":  KEEPEncoder,
+    "keep":  KEEPEncoder,
 }
 
 __all__ = [
     "BasePatchEncoder",
     "DINOEncoder",
     "UNIEncoder",
-    # "CONCHEncoder",
-    # "KEEPEncoder",
+    "KEEPEncoder",
     "ENCODER_REGISTRY",
 ]

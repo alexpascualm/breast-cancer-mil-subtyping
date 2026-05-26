@@ -61,7 +61,7 @@ def parse_args():
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     parser.add_argument("--patch_model", type=str, default="dino",
-                        choices=["dino", "uni"],
+                        choices=["dino", "uni", "keep"],
                         help="Extractor de características")
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
     parser.add_argument("--mil_aggregation_mode", type=str, default="abMIL-bag-level",
@@ -128,6 +128,7 @@ ALL_TASKS = [
 ALL_ENCODERS = [
     "uni",
     "dino",
+    "keep",
 ]
 
 ALL_MIL_MODES = [

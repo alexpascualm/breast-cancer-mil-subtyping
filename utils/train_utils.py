@@ -36,23 +36,12 @@ ENCODER_CONFIGS = {
         "patch_size":     224,
         "embed_dim":      1024,         # ViT-L/16
     },
-
-    # "uni2": {
-    #     "uni_model_name": "MahmoodLab/UNI2-h",
-    #     "patch_size":     224,
-    #     "embed_dim":      1536,         # ViT-H/14
-    # },
-    # "conch": {
-    #     "conch_model_name": "MahmoodLab/conchv1_5",
-    #     "patch_size":       448,
-    #     "embed_dim":        768,
-    # },
-    # "keep": {
-    #     "keep_model_name": "Astaxanthin/KEEP",
-    #     "patch_size":      224,
-    #     "embed_dim":       1024,
-    # },
-}
+    "keep": {
+        "keep_model_name": "Astaxanthin/KEEP",
+        "patch_size":      224,
+        "embed_dim":       512,   
+    },
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
