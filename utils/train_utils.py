@@ -288,7 +288,7 @@ def make_kfold_splits(df: pd.DataFrame, label_col: str, seed: int, k: int = 4):
                     Debe contener la columna 'patient_id' como string.
         label_col : str  columna de etiquetas (== nombre de la tarea).
         seed      : int  semilla para reproducibilidad.
-        k         : int  número de folds (por defecto 5).
+        k         : int  número de folds (por defecto 4).
 
     Returns:
         fold_indices     : lista de k arrays con los índices posicionales
