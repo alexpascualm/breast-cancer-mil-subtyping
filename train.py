@@ -2,7 +2,6 @@ import argparse
 import os
 import copy
 import itertools
-import shutil
 from datetime import datetime
 import time
 import numpy as np
@@ -12,10 +11,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, ConcatDataset
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from accelerate import Accelerator
-from accelerate.utils import broadcast
+from accelerate.utils import broadcast, broadcast_object_list
 import gc
 
 from data_load import (
@@ -56,18 +54,21 @@ def parse_args():
                         help="Target de clasificación")
     parser.add_argument("--ki67_threshold", type=float, default=0.14,
                         help="Umbral de binarización de Ki67")
-    parser.add_argument("--filter_ductal", action="store_true",
-                        help="Entrenar solo con carcinomas ductales")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     parser.add_argument("--patch_model", type=str, default="dino",
                         choices=["dino", "uni", "keep"],
                         help="Extractor de características")
-    parser.add_argument("--unfreeze_patch_model_backbone", action="store_true")
+
+    parser.add_argument("--unfreeze_patch_model_backbone", action="store_true",
+                        help="Si se activa, se hace fine-tunning del encoder de característica. (En modo precomputed_embeddings_folder, el encoder ya no se usa, así que este flag no tiene efecto).")
+
     parser.add_argument("--mil_aggregation_mode", type=str, default="abMIL-bag-level",
                         choices=["max-instance-level", "max-bag-level", "mean-instance-level", "mean-bag-level", "abMIL-instance-level", "abMIL-bag-level", "transMIL"])
+
     parser.add_argument("--patch_resize_size", type=int, default=224,
                         help="Dimensiones de reescalado de los parches")
+
     parser.add_argument("--precomputed_embeddings_folder", type=str, default=bcnb_embeddings_path,
                         help="Si se especifica, usa embeddings precomputados en lugar "
                              "de procesar imágenes con el encoder en cada época.")
@@ -90,19 +91,16 @@ def parse_args():
                         help="Número de folds para cross-validation (mínimo 2). ")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
-    parser.add_argument("--load_on_demand",         action="store_true")
+    parser.add_argument("--load_on_demand",         action="store_true",
+                        help="Si se activa, los datasets cargarán los datos desde disco bajo demanda en __getitem__, en lugar de cargarlos todos en memoria al inicio. Recomendado para máquinas con poca RAM.")
+
     parser.add_argument("--small_dataset_for_test", action="store_true")
     parser.add_argument("--seed",                   type=int, default=98)
-    parser.add_argument("--experiment_nickname",    type=str, default="")
-    parser.add_argument("--save_models",            action="store_true",
-                        help="Si se activa, guarda checkpoints best_model y "
-                             "last_model en disco.")
-
-    parser.add_argument("--resume_training",       action="store_true")
-    parser.add_argument("--pretrained_model_path", type=str, default=None)
+    parser.add_argument("--experiment_nickname",    type=str, default="",
+                        help="Apodo opcional para identificar el experimento en los logs y resultados.")
 
     parser.add_argument("--hf_token", type=str, default=None,
-                        help="HuggingFace token para descargar modelos privados")
+                        help="HuggingFace token para login y uso de modelos privados")
 
     # ── Modo multi-configuración ───────────────────────────────────────────────
     parser.add_argument("--run_all_configs", action="store_true",
@@ -200,11 +198,6 @@ def make_initial_data_split(args) -> tuple:
         ki67_threshold=args.ki67_threshold,
     )
 
-    if args.filter_ductal:
-        before = len(df)
-        df = df[df["tumour_type"] == "Invasive ductal carcinoma"].reset_index(drop=True)
-        print(f"Filtro ductal: {before} → {len(df)} WSIs", flush=True)
-
     df["patient_id"] = df["patient_id"].astype(str)
 
     print(f"Total WSIs en el DataFrame maestro: {len(df)}", flush=True)
@@ -246,7 +239,7 @@ def make_initial_data_split(args) -> tuple:
 # NO construye dataloaders, NO lanza entrenamiento.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def prepare_task_data(args, dev_df, task: str, patch_model: str) -> tuple:
+def prepare_task_data(args, dev_df, task: str, patch_model: str | None = None) -> tuple:
     """
     Prepara la partición K-Fold y carga los datasets base para una tarea.
 
@@ -259,8 +252,7 @@ def prepare_task_data(args, dev_df, task: str, patch_model: str) -> tuple:
     args        : Namespace con los argumentos de línea de comandos.
     dev_df      : pd.DataFrame con las muestras de desarrollo.
     task        : str — nombre de la tarea / columna de etiquetas.
-    patch_model : str — nombre del encoder; necesario para resolver la carpeta
-                  de embeddings precomputados cuando aplica.
+    patch_model : str | None — nombre del encoder; necesario para resolver la carpeta de embeddings precomputados cuando aplica.
 
     Returns
     -------
@@ -289,10 +281,10 @@ def prepare_task_data(args, dev_df, task: str, patch_model: str) -> tuple:
 
     # ── Construir datasets base (uno por fold) ────────────────────────────────
     precomputed = args.precomputed_embeddings_folder is not None
-    emb_folder = (
-        os.path.join(args.precomputed_embeddings_folder, patch_model)
-        if precomputed else None
-    )
+    if precomputed and not patch_model:
+        raise ValueError("Si se especifica --precomputed_embeddings_folder, también se debe indicar --patch_model para resolver la carpeta correcta de embeddings.")
+
+    emb_folder = (os.path.join(args.precomputed_embeddings_folder, patch_model) if precomputed and patch_model else None)
 
     def _make_base_dataset(idx):
         """Construye un dataset para los índices posicionales `idx`."""
@@ -367,8 +359,6 @@ def run_kfolds(
             train_metrics.csv
             val_metrics.csv
             best_eval.csv          ← métricas de val en la mejor época
-            [best_model/]          ← solo si --save_models
-            [last_model/]          ← solo si --save_models
           fold_1/
             ...
 
@@ -401,13 +391,12 @@ def run_kfolds(
             if args.optimizer == "AdamW"
             else f"{args.optimizer}_mom{args.momentum}"
         )
-        ductal        = "_ductal"        if args.filter_ductal  else ""
         weighted      = "_weighted_loss" if args.weighted_loss  else ""
         small         = "_small"         if args.small_dataset_for_test else ""
 
         run_name = (
             f"{nickname}{timestamp}"
-            f"_task-{task}{ductal}{weighted}"
+            f"_task-{task}{weighted}"
             f"_model-{patch_model}_{freeze_status}"
             f"_MIL-{mil_aggregation_mode}"
             f"_{opt_name}_lr{args.learning_rate}_wd{args.weight_decay}"
@@ -417,6 +406,14 @@ def run_kfolds(
         exp_results_path = os.path.join(args.results_path, "experiments", run_name)
         os.makedirs(exp_results_path, exist_ok=True)
         print(f"\nResultados del experimento en: {exp_results_path}", flush=True)
+    
+    # ── Broadcast de la ruta a todos los procesos multi-GPU ─────────────────────────────
+    exp_results_path_container = [exp_results_path]
+    broadcast_object_list(exp_results_path_container, from_process=0)
+    exp_results_path = exp_results_path_container[0]
+
+    # Ahora todos los procesos en multi-GPU construyen rutas correctas
+    exp_log_path = os.path.join(exp_results_path, "experiment_log.txt")
 
     # ── Log global del experimento ────────────────────────────────────────────
     exp_log_path = os.path.join(exp_results_path, "experiment_log.txt")
@@ -451,6 +448,12 @@ def run_kfolds(
         if accelerator.is_main_process:
             os.makedirs(fold_results_path, exist_ok=True)
 
+        # ── Broadcast de la ruta a todos los procesos multi-GPU ─────────────────────────────
+        fold_results_path_container = [fold_results_path]
+        broadcast_object_list(fold_results_path_container, from_process=0)
+        fold_results_path = fold_results_path_container[0]
+
+        # Ahora todos los procesos en multi-GPU construyen rutas correctas
         log_path        = os.path.join(fold_results_path, "train_log.txt")
         best_model_path = os.path.join(fold_results_path, "best_model")
         last_model_path = os.path.join(fold_results_path, "last_model")
@@ -509,7 +512,7 @@ def run_kfolds(
         else:
             criterion = nn.CrossEntropyLoss()
 
-        # ── Optimizador y scheduler ───────────────────────────────────────────
+        # ── Optimizador ───────────────────────────────────────────
         if args.optimizer == "SGD":
             optimizer = optim.SGD(
                 model.parameters(),
@@ -524,19 +527,9 @@ def run_kfolds(
                 weight_decay=args.weight_decay,
             )
 
-        scheduler = ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5,
-            patience=10, min_lr=1e-7, threshold=1e-4,
-        )
 
         # ── Accelerate ────────────────────────────────────────────────────────
-        model, optimizer, scheduler, train_loader, val_loader = accelerator.prepare(model, optimizer, scheduler, train_loader, val_loader)
-
-        if args.resume_training:
-            if not args.pretrained_model_path:
-                raise ValueError("--resume_training requiere --pretrained_model_path")
-            accelerator.load_state(args.pretrained_model_path)
-            print(f"Reanudando desde: {args.pretrained_model_path}", flush=True)
+        model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
 
         # ── Bucle de entrenamiento ────────────────────────────────────────────
         best_val_loss    = float("inf")
@@ -591,13 +584,10 @@ def run_kfolds(
             val_loss_tensor = torch.tensor(val_loss, device=device)
             broadcast(val_loss_tensor, from_process=0)
             val_loss_sync = val_loss_tensor.item()
-            scheduler.step(val_loss_sync)
 
             # Último checkpoint
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
-                if args.save_models:
-                    accelerator.save_state(last_model_path)
                 elapsed = time.time() - t_ep
                 print(f"Época {epoch} — {elapsed:.1f}s", flush=True)
                 with open(log_path, "a") as f:
@@ -615,8 +605,6 @@ def run_kfolds(
                     print(msg, flush=True)
                     with open(log_path, "a") as f:
                         f.write(msg + "\n")
-                    if args.save_models:
-                        accelerator.save_state(best_model_path)
                         
                 else:
                     no_improve += 1
@@ -645,7 +633,7 @@ def run_kfolds(
 
         # Liberar modelo y optimizador para el siguiente fold
         accelerator.free_memory()
-        del model, optimizer, scheduler, train_loader, val_loader
+        del model, optimizer, train_loader, val_loader
         torch.cuda.empty_cache()
         gc.collect()
 
@@ -751,7 +739,7 @@ if __name__ == "__main__":
             else:
                 # ── Modo imagen: recargar solo cuando cambia la tarea ─────────
                 df_task, fold_indices, kfold_report_str, base_datasets = prepare_task_data(
-                    args, dev_df, task=task, patch_model=ALL_ENCODERS[0],
+                    args, dev_df, task=task,
                 )
 
                 for patch_model, mil_mode in encoder_mil_combos:

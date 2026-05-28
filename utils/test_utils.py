@@ -3,14 +3,6 @@ utils/test_utils.py
 --------------------
 Utilidades para el script de entrenamiento definitivo y evaluación en test.
 
-Funciones principales:
-  · parse_run_name          — parsea el nombre de carpeta de experimento.
-  · load_best_eval_metrics  — carga best_eval.csv de cada fold de un experimento.
-  · aggregate_fold_metrics  — agrega métricas entre folds (media ± std).
-  · select_best_config      — selecciona la mejor combinación de hiperparámetros
-                              por tarea según una métrica de ranking.
-  · build_final_train_args  — construye los argumentos definitivos a partir de
-                              la configuración ganadora.
 """
 
 import os
@@ -25,7 +17,7 @@ from typing import Optional
 # ──────────────────────────────────────────────────────────────────────────────
 # REGEX de nombres de carpeta de experimento
 # Formato generado por train.py::run_kfolds:
-#   [nickname_]YYYYMMDD_HHMMSS_task-TASK[_ductal][_weighted_loss]
+#   [nickname_]YYYYMMDD_HHMMSS_task-TASK[_weighted_loss]
 #   _model-MODEL_frozen|unfrozen_MIL-MILMODE_OPT_lrLR_wdWD_bsBS_epEP_KFOLDfold[_small]
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -34,12 +26,11 @@ RUN_RE = re.compile(
     (?:(?P<nickname>.+?)_)?           # nickname opcional
     (?P<timestamp>\d{8}_\d{6})_      # timestamp
     task-(?P<task>.+?)                # task  (puede tener guiones)
-    (?P<ductal>_ductal)?              # flag ductal
     (?P<weighted>_weighted_loss)?     # flag weighted loss
     _model-(?P<model>[^_]+)_          # patch model
     (?P<freeze>frozen|unfrozen)_      # frozen / unfrozen
     MIL-(?P<mil>[^_]+)_              # MIL mode
-    (?P<optimizer>AdamW|SGD[^_]*)_   # optimizer
+    (?P<optimizer>AdamW|SGD(?:_mom[\d.]+)?)_ # optimizer
     lr(?P<lr>[\d.e+-]+)_             # learning rate
     wd(?P<wd>[\d.e+-]+)_             # weight decay
     bs(?P<bs>\d+)_                   # batch size
@@ -65,7 +56,7 @@ def parse_run_name(folder: str) -> Optional[dict]:
     -------
     dict con las claves:
         run_name, nickname, timestamp, task, model, freeze, mil,
-        optimizer, lr, wd, batch_size, max_epochs, ductal,
+        optimizer, lr, wd, batch_size, max_epochs,
         weighted_loss, kfold, small
     o None si el nombre no coincide con el patrón esperado.
     """
@@ -86,7 +77,6 @@ def parse_run_name(folder: str) -> Optional[dict]:
         wd=float(d["wd"]),
         batch_size=int(d["bs"]),
         max_epochs=int(d["ep"]),
-        ductal=d["ductal"] is not None,
         weighted_loss=d["weighted"] is not None,
         kfold=int(d["kfold"]),
         small=d["small"] is not None,
@@ -318,7 +308,6 @@ def select_best_config(
                 f"  lr / wd            : {meta['lr']} / {meta['wd']}\n"
                 f"  optimizer          : {meta['optimizer']}\n"
                 f"  weighted_loss      : {meta['weighted_loss']}\n"
-                f"  ductal             : {meta['ductal']}\n"
                 f"  batch_size         : {meta['batch_size']}\n"
                 f"  kfold              : {meta['kfold']}\n",
                 flush=True,
@@ -364,7 +353,6 @@ def build_final_args(base_args: SimpleNamespace, task: str, best: dict) -> Simpl
     args.weight_decay         = meta["wd"]
     args.batch_size           = meta["batch_size"]
     args.weighted_loss        = meta["weighted_loss"]
-    args.filter_ductal        = meta["ductal"]
 
     # Número de épocas definitivas = media de las mejores épocas por fold
     # Se añade 1 porque los índices de época empiezan en 0

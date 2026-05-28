@@ -133,7 +133,7 @@ class TransMIL(BaseMIL):
         self.norm = nn.LayerNorm(dim_model)
 
         # Clasificador de WSI (sobre CLS token)
-        self.bag_classifier = nn.Sequential(nn.Dropout(0.2), nn.Linear(dim_model, num_classes))
+        self.bag_classifier = nn.Linear(dim_model, num_classes)
     # ------------------------------------------------------------------
 
     def forward(

@@ -6,9 +6,8 @@ Entrenamiento definitivo + inferencia en test set.
 Flujo por cada tarea:
   1. Lee los resultados de experimentos de la carpeta indicada y selecciona
      la mejor combinación de hiperparámetros por tarea (según `--rank_metric`).
-  2. Entrena un modelo final usando TODO el conjunto de development (dev_df)
-     durante tantas épocas como la media de las mejores épocas de los folds
-     ganadores.
+  2. Entrena un modelo final usando el conjunto de development (dev_df) completo.
+     durante tantas épocas como la media de las mejores épocas de los folds del experimento ganador.
   3. Infiere sobre el test set y guarda métricas en CSV.
   4. Guarda (opcionalmente) el modelo definitivo en disco.
 
@@ -36,14 +35,12 @@ import argparse
 import os
 import time
 import gc
-import copy
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from accelerate import Accelerator
 from accelerate.utils import broadcast
@@ -68,7 +65,6 @@ from config import (
     bcnb_images_folder_path,
     bcnb_labels_df_path,
     bcnb_embeddings_path,
-    results_folder_path,
 )
 
 
@@ -121,8 +117,7 @@ def parse_args():
         default="balanced_accuracy",
         help=(
             "Métrica usada para seleccionar la mejor configuración de "
-            "hiperparámetros por tarea (leída de best_eval.csv). "
-            "Por defecto: 'balanced_accuracy'."
+            "hiperparámetros por tarea (leída y promediada de los best_eval.csv de cada fold de cada experimento). "
         ),
     )
     parser.add_argument(
@@ -207,9 +202,7 @@ def load_splits(args) -> tuple:
     """
     Carga dev_df y test_df desde los CSV guardados por train.py.
 
-    Busca por defecto en <source_results_path>/dev_df.csv y test_df.csv.
-    Si no existen, los genera de nuevo usando create_file_label_df y
-    stratified_dev_test_split con los mismos parámetros que train.py.
+    Si no se especifican rutas, busca por defecto en <source_results_path>/dev_df.csv y test_df.csv.
 
     Returns
     -------
@@ -224,38 +217,12 @@ def load_splits(args) -> tuple:
         test_df = pd.read_csv(test_path)
         print(f"  dev  : {len(dev_df)} WSIs\n  test : {len(test_df)} WSIs", flush=True)
         return dev_df, test_df
-
-    # ── Generar splits de nuevo ───────────────────────────────────────────────
-    print(
-        "\n[WARN] No se encontraron dev_df.csv / test_df.csv en "
-        f"{args.source_results_path}.\nGenerando splits de nuevo ...",
-        flush=True,
-    )
-    from data_load import create_file_label_df
-    from utils.train_utils import stratified_dev_test_split
-
-    df = create_file_label_df(
-        images_path=args.images_folder,
-        data_path=args.df_path,
-        slide_col=args.slide_col,
-        small_dataset_for_test=args.small_dataset_for_test,
-        ki67_threshold=args.ki67_threshold,
-    )
-    df["patient_id"] = df["patient_id"].astype(str)
-
-    dev_df, test_df = stratified_dev_test_split(
-        df,
-        label_col="molecular_subtype",
-        test_size=0.20,
-        seed=args.seed,
-    )
-
-    os.makedirs(args.source_results_path, exist_ok=True)
-    dev_df.to_csv(dev_path,   index=False)
-    test_df.to_csv(test_path, index=False)
-    print(f"Splits guardados en:\n  {dev_path}\n  {test_path}", flush=True)
-
-    return dev_df, test_df
+    else:
+        error_msg = (
+            f"Splits dev/test no encontrados en:\n  dev  → {dev_path}\n  test → {test_path}\n"
+            "Parando ejecución. Asegúrate de que train.py se haya ejecutado previamente y haya guardado los splits"
+        )
+        raise ValueError(error_msg)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -324,10 +291,7 @@ def run_final_training_and_test(
     _log(f"  test (tarea válida): {len(df_test_task)} WSIs")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
-    emb_folder = (
-        os.path.join(args.precomputed_embeddings_folder, args.patch_model)
-        if precomputed else None
-    )
+    emb_folder = (os.path.join(args.precomputed_embeddings_folder, args.patch_model)if precomputed else None)
 
     all_dev_indices  = np.arange(len(df_dev_task))
     all_test_indices = np.arange(len(df_test_task))
@@ -385,7 +349,7 @@ def run_final_training_and_test(
     else:
         criterion = nn.CrossEntropyLoss()
 
-    # ── Optimizador y scheduler ───────────────────────────────────────────────
+    # ── Optimizador ───────────────────────────────────────────────
     if args.optimizer == "SGD":
         optimizer = optim.SGD(
             model.parameters(),
@@ -400,15 +364,9 @@ def run_final_training_and_test(
             weight_decay=args.weight_decay,
         )
 
-    scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5,
-        patience=10, min_lr=1e-7, threshold=1e-4,
-    )
 
     # ── Accelerate ────────────────────────────────────────────────────────────
-    model, optimizer, scheduler, train_loader, test_loader = accelerator.prepare(
-        model, optimizer, scheduler, train_loader, test_loader
-    )
+    model, optimizer, train_loader, test_loader = accelerator.prepare(model, optimizer, train_loader, test_loader) 
 
     # ── Bucle de entrenamiento definitivo ─────────────────────────────────────
     _log(f"\n  Iniciando entrenamiento definitivo: {args.epochs} época(s) ...\n")
@@ -431,11 +389,6 @@ def run_final_training_and_test(
             )
             _log(f"\n --- Matriz de confusión en Train ---")
             _log(train_conf_mat.to_string())
-
-        # Scheduler step (sincronizado entre procesos)
-        train_loss_tensor = torch.tensor(train_loss, device=device)
-        broadcast(train_loss_tensor, from_process=0)
-        scheduler.step(train_loss_tensor.item())
 
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
@@ -471,7 +424,7 @@ def run_final_training_and_test(
 
     # ── Liberar memoria ───────────────────────────────────────────────────────
     accelerator.free_memory()
-    del model, optimizer, scheduler, train_loader, test_loader
+    del model, optimizer, train_loader, test_loader
     torch.cuda.empty_cache()
     gc.collect()
 
