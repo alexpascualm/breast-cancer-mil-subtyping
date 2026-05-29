@@ -73,122 +73,63 @@ from config import (
 # ──────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Entrenamiento definitivo sobre dev completo + inferencia en test"
-    )
+    parser = argparse.ArgumentParser(description="Entrenamiento definitivo sobre dev completo + inferencia en test")
 
     # ── Origen de resultados de búsqueda de hiperparámetros ───────────────────
-    parser.add_argument(
-        "--source_results_path",
-        type=str,
-        required=True,
-        help=(
-            "Ruta a la carpeta de resultados de búsqueda de hiperparámetros. "
+    parser.add_argument("--source_results_path", type=str, required=True,
+        help=("Ruta a la carpeta de resultados de búsqueda de hiperparámetros. "
             "Se buscará en <source_results_path>/experiments/ para seleccionar "
-            "la mejor configuración por tarea."
-        ),
-    )
+            "la mejor configuración por tarea."))
 
     # ── Destino de los resultados finales ─────────────────────────────────────
-    parser.add_argument(
-        "--test_results_path",
-        type=str,
-        default=None,
-        help=(
-            "Carpeta raíz donde se guardarán los resultados finales. "
-            "Por defecto: <source_results_path>/test_results"
-        ),
-    )
+    parser.add_argument("--test_results_path", type=str, default=None,
+        help=("Carpeta raíz donde se guardarán los resultados finales. "
+            "Por defecto: <source_results_path>/test_results"))
 
     # ── Selección de tareas ───────────────────────────────────────────────────
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        nargs="+",
+    parser.add_argument("--tasks", type=str, nargs="+",
         default=["er", "pr", "her2", "ki67", "molecular_subtype"],
         choices=["er", "pr", "her2", "ki67", "molecular_subtype"],
-        help="Tareas para las que entrenar y evaluar el modelo definitivo.",
-    )
+        help="Tareas para las que entrenar y evaluar el modelo definitivo.")
 
     # ── Métrica de ranking para selección de hiperparámetros ─────────────────
-    parser.add_argument(
-        "--rank_metric",
-        type=str,
-        default="balanced_accuracy",
-        help=(
-            "Métrica usada para seleccionar la mejor configuración de "
-            "hiperparámetros por tarea (leída y promediada de los best_eval.csv de cada fold de cada experimento). "
-        ),
-    )
-    parser.add_argument(
-        "--rank_ascending",
-        action="store_true",
-        help="Si se activa, menor valor de rank_metric es mejor (útil para 'loss').",
-    )
+    parser.add_argument("--rank_metric", type=str, default="balanced_accuracy",
+        help=("Métrica usada para seleccionar la mejor configuración de hiperparámetros por tarea (leída y promediada de los best_eval.csv de cada fold de cada experimento). "))
+
+    parser.add_argument("--rank_ascending", action="store_true",
+        help="Si se activa, menor valor de rank_metric es mejor (útil para 'loss').")
 
     # ── Datos ─────────────────────────────────────────────────────────────────
-    parser.add_argument("--images_folder",  type=str, default=bcnb_images_folder_path)
-    parser.add_argument("--df_path",        type=str, default=bcnb_labels_df_path)
-    parser.add_argument("--slide_col",      type=str, default="Patient ID")
-    parser.add_argument(
-        "--precomputed_embeddings_folder",
-        type=str,
-        default=bcnb_embeddings_path,
-        help="Carpeta de embeddings precomputados. Si se especifica, se usarán "
-             "en lugar de procesar imágenes con el encoder en cada época.",
-    )
+    parser.add_argument("--images_folder", type=str, default=bcnb_images_folder_path)
+    parser.add_argument("--df_path", type=str, default=bcnb_labels_df_path)
+    parser.add_argument("--slide_col", type=str, default="Patient ID")
+    parser.add_argument("--precomputed_embeddings_folder", type=str, default=bcnb_embeddings_path,
+                        help="Carpeta de embeddings precomputados. Si se especifica, se usarán en lugar de procesar imágenes con el encoder en cada época.")
 
     # ── Split dev/test ────────────────────────────────────────────────────────
     # test.py CARGA los splits previamente guardados por train.py.
-    # Si no existen, los genera de nuevo con los mismos parámetros.
-    parser.add_argument(
-        "--dev_df_path",
-        type=str,
-        default=None,
-        help=(
-            "Ruta al CSV dev_df.csv generado por train.py. "
-            "Si no se especifica se busca en <source_results_path>/dev_df.csv."
-        ),
-    )
-    parser.add_argument(
-        "--test_df_path",
-        type=str,
-        default=None,
-        help=(
-            "Ruta al CSV test_df.csv generado por train.py. "
-            "Si no se especifica se busca en <source_results_path>/test_df.csv."
-        ),
-    )
-    parser.add_argument(
-        "--ki67_threshold", type=float, default=0.14,
-        help="Umbral de binarización de Ki67 (solo si se regenera el split)."
-    )
-    parser.add_argument(
-        "--small_dataset_for_test", action="store_true",
-        help="Subset pequeño de datos (solo para pruebas rápidas)."
-    )
+    parser.add_argument("--dev_df_path", type=str, default=None,
+                        help=("Ruta al CSV dev_df.csv generado por train.py. "
+                        "Si no se especifica se busca en <source_results_path>/dev_df.csv."))
+
+    parser.add_argument("--test_df_path", type=str, default=None,
+                        help=("Ruta al CSV test_df.csv generado por train.py. "
+                        "Si no se especifica se busca en <source_results_path>/test_df.csv."))
 
     # ── Entrenamiento definitivo ──────────────────────────────────────────────
-    parser.add_argument(
-        "--epochs_override",
-        type=int,
-        default=None,
-        help=(
-            "Si se especifica, sobreescribe el número de épocas calculado "
-            "automáticamente a partir de la media de mejores épocas de los folds."
-        ),
-    )
-    parser.add_argument("--batch_size",    type=int,   default=None,
+    parser.add_argument("--epochs_override", type=int, default=None,
+        help=("Si se especifica, sobreescribe el número de épocas calculado automáticamente a partir de la media de mejores épocas de los folds."))
+
+    parser.add_argument("--batch_size", type=int, default=None,
                         help="Sobreescribe el batch_size de la config ganadora.")
-    parser.add_argument("--momentum",      type=float, default=0.9,
-                        help="Solo para SGD.")
+
     parser.add_argument("--load_on_demand", action="store_true")
 
     # ── Misc ──────────────────────────────────────────────────────────────────
-    parser.add_argument("--seed",       type=int, default=98)
+    parser.add_argument("--seed", type=int, default=98)
     parser.add_argument("--save_models", action="store_true",
                         help="Guarda el modelo definitivo en disco.")
-    parser.add_argument("--hf_token",   type=str, default=None,
+    parser.add_argument("--hf_token", type=str, default=None,
                         help="HuggingFace token para modelos privados.")
 
     return parser.parse_args()
@@ -291,7 +232,7 @@ def run_final_training_and_test(
     _log(f"  test (tarea válida): {len(df_test_task)} WSIs")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
-    emb_folder = (os.path.join(args.precomputed_embeddings_folder, args.patch_model)if precomputed else None)
+    emb_folder = (os.path.join(args.precomputed_embeddings_folder, args.patch_model) if precomputed else None)
 
     all_dev_indices  = np.arange(len(df_dev_task))
     all_test_indices = np.arange(len(df_test_task))
