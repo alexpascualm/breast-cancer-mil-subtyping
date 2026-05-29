@@ -11,6 +11,7 @@ from huggingface_hub import login
 from torchvision import transforms as T
 from PIL import Image
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from utils.train_utils import ENCODER_CONFIGS
 from models.patch_encoders import ENCODER_REGISTRY
 from data_load import create_file_label_df

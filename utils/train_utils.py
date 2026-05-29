@@ -39,7 +39,7 @@ ENCODER_CONFIGS = {
     "keep": {
         "keep_model_name": "Astaxanthin/KEEP",
         "patch_size":      224,
-        "embed_dim":       512,   
+        "embed_dim":       768,
     },
     }
 
@@ -199,7 +199,7 @@ def get_model(
         Requiere usar WSIClassifier.forward_from_embeddings() en lugar de forward().
 
     Args:
-        patch_encoder_type (str) : 'dino' | 'uni'.
+        patch_encoder_type (str) : 'dino' | 'uni' | 'keep' .
         mil_aggregation_mode (str): 'max' | 'mean' | 'abMIL-instance-level' | 'abMIL-bag-level' | 'transMIL'.
         unfreeze_backbone (bool) : descongelar últimos bloques del backbone (ignorado si skip_encoder=True).
         num_classes (int)        : número de clases de salida.

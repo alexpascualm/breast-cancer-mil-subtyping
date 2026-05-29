@@ -126,7 +126,7 @@ ALL_TASKS = [
 ALL_ENCODERS = [
     "uni",
     "dino",
-    # "keep",
+    "keep",
 ]
 
 ALL_MIL_MODES = [
@@ -140,14 +140,14 @@ ALL_MIL_MODES = [
 ]
 
 ALL_LEARNING_RATES = [
-    1e-3,
+    # 1e-3,
     1e-4,
-    1e-5,
+    # 1e-5,
 ]
 
 ALL_WEIGHT_DECAYS = [
     1e-3,
-    1e-4,
+    # 1e-4,
 ]
 
 

@@ -35,7 +35,7 @@ def parse_args():
         description="t-SNE sobre embeddings → HTML interactivo"
     )
     parser.add_argument("--patch_model",       type=str, default="dino",
-                        choices=["dino", "uni"])
+                        choices=["dino", "uni", "keep"])
     parser.add_argument("--embeddings_folder", type=str, default=bcnb_embeddings_path)
     parser.add_argument("--images_folder",     type=str, default=bcnb_images_folder_path)
     parser.add_argument("--df_path",           type=str, default=bcnb_labels_df_path)
