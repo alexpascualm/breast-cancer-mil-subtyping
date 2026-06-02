@@ -21,12 +21,12 @@ from config import bcnb_images_folder_path, bcnb_labels_df_path, bcnb_embeddings
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--patch_model",     type=str, default="dino",
-                        choices=["dino", "uni", "keep"])
+                        choices=["dino", "uni", "keep", "gigapath"])
     parser.add_argument("--images_folder",   type=str, default=bcnb_images_folder_path)
     parser.add_argument("--df_path",         type=str, default=bcnb_labels_df_path)
     parser.add_argument("--output_folder",   type=str, default=bcnb_embeddings_path,
                         help="Carpeta donde guardar los .h5 de embeddings")
-    parser.add_argument("--chunk_size",      type=int, default=512)
+    parser.add_argument("--chunk_size",      type=int, default=32)
     parser.add_argument("--patch_resize_size", type=int, default=224)
     parser.add_argument("--hf_token",        type=str, default=None)
     parser.add_argument("--overwrite",       action="store_true",
@@ -54,6 +54,7 @@ def extract_embeddings(args):
         unfreeze_backbone=False,   # siempre congelado en extracción
         **encoder_kwargs,
     ).to(device)
+
     encoder.eval()
     print(f"Encoder '{args.patch_model}' cargado. embed_dim={encoder.embed_dim}", flush=True)
 
@@ -81,6 +82,7 @@ def extract_embeddings(args):
         wsi_id = os.path.splitext(os.path.basename(h5_src))[0]
         out_path = os.path.join(model_output_dir, f"{wsi_id}.h5")
 
+        # Si el .h5 de destino ya existe y no se ha indicado --overwrite, lo saltamos
         if os.path.exists(out_path) and not args.overwrite:
             try:
                 with h5py.File(out_path, "r") as h5_out:

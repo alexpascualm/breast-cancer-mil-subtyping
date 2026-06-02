@@ -57,7 +57,7 @@ def parse_args():
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     parser.add_argument("--patch_model", type=str, default="dino",
-                        choices=["dino", "uni", "keep"],
+                        choices=["dino", "uni", "keep", "gigapath"],
                         help="Extractor de características")
 
     parser.add_argument("--unfreeze_patch_model_backbone", action="store_true",
@@ -124,9 +124,10 @@ ALL_TASKS = [
 ]
 
 ALL_ENCODERS = [
-    "uni",
-    "dino",
-    "keep",
+    # "uni",
+    # "dino",
+    # "keep",
+    "gigapath",
 ]
 
 ALL_MIL_MODES = [

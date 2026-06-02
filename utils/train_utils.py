@@ -41,6 +41,11 @@ ENCODER_CONFIGS = {
         "patch_size":      224,
         "embed_dim":       768,
     },
+    "gigapath": {
+        "gigapath_model_name": "prov-gigapath/prov-gigapath",
+        "patch_size":          224, #TODO Revisar (HF dice 256 pero luego hacen center crop a 224)
+        "embed_dim":           1536,    # ViT-G/14
+    },
     }
 
 
