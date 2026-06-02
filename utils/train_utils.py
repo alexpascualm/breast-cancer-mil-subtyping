@@ -482,6 +482,7 @@ def run_epoch(
         conf_mat_df = pd.DataFrame()
         heatmap_df = None
 
+        accelerator.wait_for_everyone()  # Asegura que todos han terminado antes de procesar métricas y heatmaps
         if accelerator.is_main_process:
             y_true = torch.cat(all_y_true).numpy()
             y_pred = torch.cat(all_y_pred).numpy()

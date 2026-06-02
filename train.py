@@ -140,14 +140,13 @@ ALL_MIL_MODES = [
 ]
 
 ALL_LEARNING_RATES = [
-    # 1e-3,
+    1e-3,
     1e-4,
-    # 1e-5,
 ]
 
 ALL_WEIGHT_DECAYS = [
     1e-3,
-    # 1e-4,
+    1e-4,
 ]
 
 
@@ -455,8 +454,6 @@ def run_kfolds(
 
         # Ahora todos los procesos en multi-GPU construyen rutas correctas
         log_path        = os.path.join(fold_results_path, "train_log.txt")
-        best_model_path = os.path.join(fold_results_path, "best_model")
-        last_model_path = os.path.join(fold_results_path, "last_model")
 
         if accelerator.is_main_process:
             with open(log_path, "a") as f:
@@ -601,7 +598,7 @@ def run_kfolds(
                     best_val_epoch   = epoch
                     best_val_metrics = val_metrics      # guardar métricas de la mejor época
                     no_improve       = 0
-                    msg = f"  → Mejor modelo guardado (val_loss={best_val_loss:.4f}) ======================================================"
+                    msg = f"  → Mejor modelo registrado (val_loss={best_val_loss:.4f}) ======================================================"
                     print(msg, flush=True)
                     with open(log_path, "a") as f:
                         f.write(msg + "\n")

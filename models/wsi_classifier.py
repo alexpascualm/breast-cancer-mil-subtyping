@@ -94,7 +94,7 @@ class WSIClassifier(nn.Module):
             with torch.no_grad():
                 total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
         else:
-            total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim)
+            total_feats = self.encoder.forward(all_patches_cpu)  # (N_total, embed_dim) # TODO Controlar gradientes en parte congelada del enconder. unfreeze_backbone solo descongela parcialmente. 
         
         # ── Clasificación / agregación ────────────────────────────────────
         if self.is_bag_based:

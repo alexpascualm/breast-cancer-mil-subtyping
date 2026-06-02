@@ -140,7 +140,7 @@ def compute_binary_metrics(y_true, y_pred, y_prob):
 
         # AUPRC para ambas clases
         metrics["auprc_pos"] = average_precision_score(y_true, y_prob_pos)
-        metrics["auprc_neg"] = average_precision_score(y_true, y_prob_pos, pos_label=0)
+        metrics["auprc_neg"] = average_precision_score(1 - y_true, 1 - y_prob_pos)
 
         # AUPRC macro / weighted
         y_true_ohe = np.eye(2)[y_true]

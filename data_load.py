@@ -168,7 +168,7 @@ class Patches_WSI_Dataset(Dataset):
             for i in tqdm(self.indices, desc="Loading breast WSI patches", file=sys.stdout):
                 row = self.dataframe.iloc[i]
                 fpath = row['features']
-                with h5py.File(fpath, "r", swmr=True) as h5:
+                with h5py.File(fpath, "r") as h5:
                     imgs   = h5["imgs"][:]
                     coords = h5["coords"][:] if self.inference_heatmap else None
 
