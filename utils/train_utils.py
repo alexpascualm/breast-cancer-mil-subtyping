@@ -437,7 +437,7 @@ def run_epoch(
             probs = torch.softmax(wsi_logits.detach(), dim=1)
             preds = probs.argmax(dim=1)
 
-            # Loss
+            # Loss - Lógica de acumulación reducida para multi-GPU para obtener la pérdida media global al final de la época, sin sesgo por el tamaño del batch del proceso.
             batch_size = labels.size(0)
             loss_value   = loss.detach() * batch_size                                   
             count_value  = torch.tensor(batch_size, dtype=torch.float32, device=device)

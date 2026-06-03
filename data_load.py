@@ -320,8 +320,6 @@ class Embeddings_WSI_Dataset(Dataset):
             coords = self.coords_cache[idx] if self.inference_heatmap else None
         else:
             emb, coords = self._read_h5(self.emb_paths[idx])
-            if not self.inference_heatmap:
-                coords = None
 
         if self.inference_heatmap:
             return emb, label, wsi_id, coords
@@ -338,7 +336,7 @@ class Embeddings_WSI_Dataset(Dataset):
 # ──────────────────────────────────────────────────────────────────────────────
 def collate_fn(batch):
     """
-    Handles batches of (imgs, label, wsi_id) or (imgs, label, wsi_id, coords).
+    Handles batches of (imgs/embeddings, label, wsi_id) or (imgs/embeddings, label, wsi_id, coords).
     Returns:
         list_features  - list of per-WSI tensors
         labels         - stacked LongTensor  [B] or [B, ...]
