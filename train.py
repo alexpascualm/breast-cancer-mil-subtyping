@@ -79,12 +79,8 @@ def parse_args():
     parser.add_argument("--patience",      type=int,   default=20)
     parser.add_argument("--optimizer",     type=str,   default="AdamW",
                         choices=["SGD", "AdamW"])
-    parser.add_argument("--momentum",      type=float, default=0.9,
-                        help="Solo para SGD")
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--weight_decay",  type=float, default=1e-3)
-    parser.add_argument("--weighted_loss", action="store_true",
-                        help="Aplicar pesos de clase en la función de pérdida")
 
     # ── K-Fold ────────────────────────────────────────────────────────────────
     parser.add_argument("--kfold", type=int, default=4,
@@ -386,17 +382,12 @@ def run_kfolds(
         timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
         nickname      = f"{args.experiment_nickname}_" if args.experiment_nickname else ""
         freeze_status = "unfrozen" if args.unfreeze_patch_model_backbone else "frozen"
-        opt_name      = (
-            args.optimizer
-            if args.optimizer == "AdamW"
-            else f"{args.optimizer}_mom{args.momentum}"
-        )
-        weighted      = "_weighted_loss" if args.weighted_loss  else ""
+        opt_name      = args.optimizer
         small         = "_small"         if args.small_dataset_for_test else ""
 
         run_name = (
             f"{nickname}{timestamp}"
-            f"_task-{task}{weighted}"
+            f"_task-{task}"
             f"_model-{patch_model}_{freeze_status}"
             f"_MIL-{mil_aggregation_mode}"
             f"_{opt_name}_lr{args.learning_rate}_wd{args.weight_decay}"
@@ -430,7 +421,7 @@ def run_kfolds(
         ds_val   = base_datasets[fold_i]
         ds_train = ConcatDataset([base_datasets[j] for j in train_fold_js])
 
-        # Índices posicionales del train en df_task (necesarios para weighted_loss)
+        # Índices posicionales del train en df_task (necesarios para perdida ponderada)
         train_global_indices = np.concatenate([fold_indices[j] for j in train_fold_js])
 
         if accelerator.is_main_process:
@@ -493,30 +484,27 @@ def run_kfolds(
             skip_encoder=precomputed,
         ).to(device)
 
-        # ── Pérdida ───────────────────────────────────────────────────────────
-        if args.weighted_loss:
-            train_labels = df_task.iloc[train_global_indices][task].tolist()
-            weights      = compute_class_weights(train_labels, num_classes).to(device)
-            criterion    = nn.CrossEntropyLoss(weight=weights)
-            if accelerator.is_main_process:
-                print("Aplicando pérdida con pesos por clase:", flush=True)
+        # ── Pérdida ─────────────────────────────────────────────────────────── 
+        train_labels = df_task.iloc[train_global_indices][task].tolist()
+        weights      = compute_class_weights(train_labels, num_classes).to(device)
+        criterion    = nn.CrossEntropyLoss(weight=weights)
+        if accelerator.is_main_process:
+            print("Aplicando pérdida con pesos por clase:", flush=True)
+            with open(log_path, "a") as f:
+                f.write("Aplicando pérdida con pesos por clase:\n")
+            for cls, w in enumerate(weights.cpu().tolist()):
+                msg = f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})"
+                print(msg, flush=True)
                 with open(log_path, "a") as f:
-                    f.write("Aplicando pérdida con pesos por clase:\n")
-                for cls, w in enumerate(weights.cpu().tolist()):
-                    msg = f"  clase {cls}: {w:.4f}  (n={train_labels.count(cls)})"
-                    print(msg, flush=True)
-                    with open(log_path, "a") as f:
-                        f.write(msg + "\n")
-        else:
-            criterion = nn.CrossEntropyLoss()
-
+                    f.write(msg + "\n")
+    
         # ── Optimizador ───────────────────────────────────────────
         if args.optimizer == "SGD":
             optimizer = optim.SGD(
                 model.parameters(),
                 lr=args.learning_rate,
                 weight_decay=args.weight_decay,
-                momentum=args.momentum,
+                momentum=0.9,
             )
         else:
             optimizer = optim.AdamW(

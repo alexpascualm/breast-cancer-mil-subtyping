@@ -1,65 +1,87 @@
 """
 utils/test_utils.py
 --------------------
-Utilidades para el script de entrenamiento definitivo y evaluación en test.
+Utilidades compartidas entre test.py y el notebook de exploración.
 
+Lógica de selección de mejor configuración por tarea
+-----------------------------------------------------
+Cada fold guarda best_eval.csv con UNA sola fila: las métricas de la época
+cuya val_loss fue mínima. La columna 'epoch' es el índice 0-based de esa época.
+
+Al agregar entre folds se obtiene la MEDIA de esas mejores épocas.
+Para el entrenamiento definitivo:
+    epochs_final = round(best_epoch_mean) + 1
+
+Estructura del JSON generado por save_best_config_json
+-------------------------------------------------------
+{
+  "task":                str,
+  "rank_metric":         str,
+  "selected":            <entry>,
+  "best_global":         <entry>,
+  "ranking_encoder_mil": [<entry>],
+  "full_ranking":        [<entry>],
+}
+
+Cada <entry> tiene: run_name, run_dir, n_folds, rank_metric, rank_value,
+rank_value_std, best_epoch, hyperparams, metrics.
 """
 
 import os
 import re
+import json
 import math
+import copy
 import numpy as np
 import pandas as pd
 from types import SimpleNamespace
 from typing import Optional
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# REGEX de nombres de carpeta de experimento
-# Formato generado por train.py::run_kfolds:
-#   [nickname_]YYYYMMDD_HHMMSS_task-TASK[_weighted_loss]
-#   _model-MODEL_frozen|unfrozen_MIL-MILMODE_OPT_lrLR_wdWD_bsBS_epEP_KFOLDfold[_small]
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# REGEX DE NOMBRES DE CARPETA
+# Formato: [nickname_]YYYYMMDD_HHMMSS_task-TASK_model-MODEL_frozen|unfrozen
+#           _MIL-MILMODE_OPT_lrLR_wdWD_bsBS_epEP_KFOLDfold[_small]
+# ─────────────────────────────────────────────────────────────────────────────
 
 RUN_RE = re.compile(
     r"""
-    (?:(?P<nickname>.+?)_)?           # nickname opcional
-    (?P<timestamp>\d{8}_\d{6})_      # timestamp
-    task-(?P<task>.+?)                # task  (puede tener guiones)
-    (?P<weighted>_weighted_loss)?     # flag weighted loss
-    _model-(?P<model>[^_]+)_          # patch model
-    (?P<freeze>frozen|unfrozen)_      # frozen / unfrozen
-    MIL-(?P<mil>[^_]+)_              # MIL mode
-    (?P<optimizer>AdamW|SGD(?:_mom[\d.]+)?)_ # optimizer
-    lr(?P<lr>[\d.e+-]+)_             # learning rate
-    wd(?P<wd>[\d.e+-]+)_             # weight decay
-    bs(?P<bs>\d+)_                   # batch size
-    ep(?P<ep>\d+)                     # epochs
-    _(?P<kfold>\d+)fold               # kfold
-    (?P<small>_small)?                # flag small
+    (?:(?P<nickname>.+?)_)?
+    (?P<timestamp>\d{8}_\d{6})_
+    task-(?P<task>.+?)
+    _model-(?P<model>[^_]+)_
+    (?P<freeze>frozen|unfrozen)_
+    MIL-(?P<mil>[^_]+)_
+    (?P<optimizer>AdamW|SGD)_
+    lr(?P<lr>[\d.e+-]+)_
+    wd(?P<wd>[\d.e+-]+)_
+    bs(?P<bs>\d+)_
+    ep(?P<ep>\d+)
+    _(?P<kfold>\d+)fold
+    (?P<small>_small)?
     """,
     re.VERBOSE,
 )
 
 FOLD_RE = re.compile(r"^fold_(\d+)$")
 
+DEFAULT_METRIC_COLS = [
+    "balanced_accuracy",
+    "accuracy",
+    "kappa",
+    "f1_macro",
+    "auprc_macro",
+    "auroc",
+    "auroc_macro",
+]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PARSING
-# ──────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARSING DEL NOMBRE DE CARPETA
+# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_run_name(folder: str) -> Optional[dict]:
-    """
-    Extrae metadatos del nombre de la carpeta de experimento.
-
-    Returns
-    -------
-    dict con las claves:
-        run_name, nickname, timestamp, task, model, freeze, mil,
-        optimizer, lr, wd, batch_size, max_epochs,
-        weighted_loss, kfold, small
-    o None si el nombre no coincide con el patrón esperado.
-    """
+    """Extrae metadatos del nombre de carpeta. Devuelve None si no coincide."""
     m = RUN_RE.search(folder)
     if m is None:
         return None
@@ -77,21 +99,17 @@ def parse_run_name(folder: str) -> Optional[dict]:
         wd=float(d["wd"]),
         batch_size=int(d["bs"]),
         max_epochs=int(d["ep"]),
-        weighted_loss=d["weighted"] is not None,
         kfold=int(d["kfold"]),
         small=d["small"] is not None,
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CARGA DE MÉTRICAS DE FOLDS
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# CARGA Y AGREGACIÓN DE MÉTRICAS DE FOLDS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_fold_dirs(run_dir: str) -> list:
-    """
-    Devuelve lista ordenada de subdirectorios fold_* dentro de run_dir.
-    Lanza ValueError si no encuentra ninguno.
-    """
+    """Devuelve lista ordenada de subdirectorios fold_* dentro de run_dir."""
     folds = [
         os.path.join(run_dir, name)
         for name in sorted(os.listdir(run_dir))
@@ -102,74 +120,153 @@ def get_fold_dirs(run_dir: str) -> list:
     return folds
 
 
-def load_best_eval_metrics(run_dir: str) -> tuple:
-    """
-    Carga best_eval.csv de cada fold de un experimento.
-
-    best_eval.csv contiene UNA sola fila: las métricas correspondientes a la
-    mejor época de validación (mínima val_loss) de ese fold.
-
-    Returns
-    -------
-    rows    : lista de pd.Series (una por fold).
-    n_folds : número de folds encontrados.
-    """
-    try:
-        fold_dirs = get_fold_dirs(run_dir)
-    except ValueError:
-        return [], 0
-
-    rows = []
-    for fd in fold_dirs:
-        best_eval_path = os.path.join(fd, "best_eval.csv")
-        if not os.path.isfile(best_eval_path):
-            continue
-        df = pd.read_csv(best_eval_path)
-        df = df.drop(columns=["classification_report"], errors="ignore")
-        if df.empty:
-            continue
-        # best_eval.csv tiene una fila; la tomamos directamente
-        rows.append(df.iloc[0])
-
-    return rows, len(fold_dirs)
+def _load_best_eval(fold_dir: str) -> Optional[pd.Series]:
+    """Carga best_eval.csv de un fold y devuelve su única fila como Series."""
+    path = os.path.join(fold_dir, "best_eval.csv")
+    if not os.path.isfile(path):
+        return None
+    df = pd.read_csv(path).drop(columns=["classification_report"], errors="ignore")
+    return df.iloc[0] if not df.empty else None
 
 
 def aggregate_fold_metrics(rows: list) -> dict:
     """
-    Agrega las métricas de los folds como media y desviación estándar.
+    Agrega métricas de los folds (media y std, ddof=0).
 
     Args
     ----
-    rows : lista de pd.Series (una por fold), salida de load_best_eval_metrics.
+    rows : lista de pd.Series, una por fold (de best_eval.csv).
 
     Returns
     -------
-    dict con claves  <metric>  y  <metric>_std  para cada columna numérica,
-    más 'n_folds_ok' con el número de folds con datos válidos.
-    Devuelve {} si rows está vacío.
+    dict con claves <metric> y <metric>_std para cada columna numérica,
+    más 'n_folds_ok'. Devuelve {} si rows está vacío.
     """
     if not rows:
         return {}
 
-    df = pd.DataFrame(rows).reset_index(drop=True)
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    all_cols = set()
+    for r in rows:
+        all_cols.update(r.index)
 
     agg = {"n_folds_ok": len(rows)}
-    for col in numeric_cols:
-        vals = df[col].dropna().values
-        if len(vals) == 0:
-            agg[col] = float("nan")
-            agg[f"{col}_std"] = float("nan")
-        else:
+    for col in all_cols:
+        vals = []
+        for r in rows:
+            if col in r.index:
+                try:
+                    vals.append(float(r[col]))
+                except (TypeError, ValueError):
+                    pass
+        if vals:
             agg[col] = float(np.mean(vals))
             agg[f"{col}_std"] = float(np.std(vals, ddof=0))
+        else:
+            agg[col] = float("nan")
+            agg[f"{col}_std"] = float("nan")
 
     return agg
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+def load_and_aggregate_run(run_dir: str, rank_metric: str) -> Optional[dict]:
+    """
+    Carga best_eval.csv de cada fold y devuelve las métricas agregadas.
+    Devuelve None si algún fold no tiene best_eval.csv o falta rank_metric.
+    """
+    try:
+        fold_dirs = get_fold_dirs(run_dir)
+    except ValueError:
+        return None
+
+    rows = []
+    for fd in fold_dirs:
+        row = _load_best_eval(fd)
+        if row is None:
+            return None  # best_eval.csv obligatorio en todos los folds
+        rows.append(row)
+
+    agg = aggregate_fold_metrics(rows)
+    if not agg or math.isnan(agg.get(rank_metric, float("nan"))):
+        return None
+
+    return agg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTRUCCIÓN DEL DATAFRAME MAESTRO (usado por el notebook)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def collect_all_runs_df(
+    experiments_path: str,
+    rank_metric: str = "balanced_accuracy",
+    ascending: bool = False,
+    task_filter: Optional[str] = None,
+    metric_cols: Optional[list] = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """
+    Escanea experiments_path y devuelve un DataFrame con todos los experimentos,
+    ordenado por rank_metric (mejor primero).
+
+    Columnas: metadatos del run + rank_value + métricas (media ± std) + best_epoch.
+    """
+    if metric_cols is None:
+        metric_cols = DEFAULT_METRIC_COLS
+
+    if not os.path.isdir(experiments_path):
+        raise FileNotFoundError(f"Carpeta no encontrada: {experiments_path}")
+
+    records, skipped = [], 0
+
+    for folder in sorted(os.listdir(experiments_path)):
+        run_dir = os.path.join(experiments_path, folder)
+        if not os.path.isdir(run_dir):
+            continue
+
+        meta = parse_run_name(folder)
+        if meta is None:
+            skipped += 1
+            continue
+
+        if task_filter and meta["task"] != task_filter:
+            continue
+
+        agg = load_and_aggregate_run(run_dir, rank_metric)
+        if agg is None:
+            skipped += 1
+            continue
+
+        record = {**meta, "rank_value": agg[rank_metric], "n_folds": agg["n_folds_ok"]}
+
+        for col in metric_cols:
+            if col in agg:
+                record[col] = agg[col]
+                record[f"{col}_std"] = agg.get(f"{col}_std", float("nan"))
+
+        if "epoch" in agg:
+            record["best_epoch"] = agg["epoch"]
+
+        records.append(record)
+
+    if verbose:
+        print(
+            f"[collect_all_runs_df] Carpetas escaneadas: {len(os.listdir(experiments_path))}\n"
+            f"  Válidos: {len(records)}  |  Omitidos: {skipped}"
+        )
+
+    if not records:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame(records)
+        .sort_values("rank_value", ascending=ascending, na_position="last")
+        .reset_index(drop=True)
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SELECCIÓN DEL MEJOR EXPERIMENTO POR TAREA
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def select_best_config(
     experiments_path: str,
@@ -180,44 +277,24 @@ def select_best_config(
     verbose: bool = True,
 ) -> dict:
     """
-    Escanea la carpeta de experimentos y selecciona la mejor configuración
-    de hiperparámetros para cada tarea.
-
-    La selección se basa en la media de `rank_metric` entre los k folds,
-    tomada de best_eval.csv (mejor época de validación por fold).
-
-    Args
-    ----
-    experiments_path : str — ruta a la subcarpeta 'experiments/' dentro de
-                       results_path (p.ej. '/workspace/results/experiments').
-    tasks            : list[str] — lista de tareas a considerar.
-    rank_metric      : str  — métrica de ranking (por defecto 'balanced_accuracy').
-    ascending        : bool — True si menor es mejor (ej. loss); False si mayor.
-    task_filter      : str | None — si se especifica, filtra sólo esa tarea.
-    verbose          : bool — imprime resumen de resultados.
+    Escanea experiments_path y selecciona la mejor configuración por tarea.
 
     Returns
     -------
-    best_per_task : dict con clave = nombre de tarea, valor = dict con:
-        {
-          'run_name'    : str,   # nombre de la carpeta del experimento ganador
-          'run_dir'     : str,   # ruta absoluta
-          'meta'        : dict,  # metadatos parseados del nombre de carpeta
-          'agg_metrics' : dict,  # métricas agregadas entre folds
-          rank_metric   : float, # valor medio de la métrica de ranking
-          'best_epoch'  : int,   # media de las mejores épocas entre folds (redondeada)
-        }
+    best_per_task : dict  {task_name -> record}
+
+    Cada record contiene:
+        run_name, run_dir, meta, agg_metrics, n_folds, <rank_metric>,
+        best_epoch, all_records (lista completa ordenada),
+        best_per_encoder_mil (dict {"MODEL_MIL" -> record})
     """
     if not os.path.isdir(experiments_path):
-        raise FileNotFoundError(
-            f"La carpeta de experimentos no existe: {experiments_path}"
-        )
+        raise FileNotFoundError(f"Carpeta no encontrada: {experiments_path}")
 
-    candidates = sorted(os.listdir(experiments_path))
-    records = []
+    records_by_task: dict = {t: [] for t in tasks}
     skipped = 0
 
-    for folder in candidates:
+    for folder in sorted(os.listdir(experiments_path)):
         run_dir = os.path.join(experiments_path, folder)
         if not os.path.isdir(run_dir):
             continue
@@ -227,68 +304,63 @@ def select_best_config(
             skipped += 1
             continue
 
-        # Filtro de tarea
         if task_filter and meta["task"] != task_filter:
             continue
         if meta["task"] not in tasks:
             skipped += 1
             continue
 
-        rows, n_folds = load_best_eval_metrics(run_dir)
-        if not rows:
-            skipped += 1
-            continue
-
-        agg = aggregate_fold_metrics(rows)
-        if not agg or math.isnan(agg.get(rank_metric, float("nan"))):
+        agg = load_and_aggregate_run(run_dir, rank_metric)
+        if agg is None:
             skipped += 1
             continue
 
         record = {
-            "run_name": folder,
-            "run_dir":  run_dir,
-            "meta":     meta,
+            "run_name":    folder,
+            "run_dir":     run_dir,
+            "meta":        meta,
             "agg_metrics": agg,
+            "n_folds":     agg["n_folds_ok"],
             rank_metric:   agg[rank_metric],
         }
-
-        # Mejor época media entre folds
         if "epoch" in agg:
-            record["best_epoch"] = int(round(agg["epoch"]))
+            record["best_epoch"] = agg["epoch"]
 
-        records.append(record)
+        records_by_task[meta["task"]].append(record)
 
     if verbose:
+        total = sum(len(v) for v in records_by_task.values())
         print(
-            f"\n[select_best_config] Experimentos escaneados : {len(candidates)}\n"
-            f"  Válidos cargados : {len(records)}\n"
-            f"  Omitidos / sin datos : {skipped}\n",
-            flush=True,
+            f"[select_best_config] Escaneados: {len(os.listdir(experiments_path))}  "
+            f"Válidos: {total}  Omitidos: {skipped}"
         )
 
-    if not records:
-        raise RuntimeError(
-            f"No se encontraron experimentos válidos en: {experiments_path}\n"
-            "Comprueba que los folds contienen best_eval.csv y que la métrica "
-            f"'{rank_metric}' está presente."
-        )
-
-    # ── Seleccionar el mejor por tarea ─────────────────────────────────────────
+    task_list = [task_filter] if task_filter else tasks
     best_per_task = {}
 
-    for task in (tasks if not task_filter else [task_filter]):
-        task_records = [r for r in records if r["meta"]["task"] == task]
+    for task in task_list:
+        task_records = records_by_task.get(task, [])
         if not task_records:
             if verbose:
-                print(f"  [WARN] No hay experimentos para la tarea '{task}'.", flush=True)
+                print(f"  [WARN] Sin experimentos para '{task}'")
             continue
 
         sorted_records = sorted(
-            task_records,
-            key=lambda r: r[rank_metric],
-            reverse=not ascending,
+            task_records, key=lambda r: r[rank_metric], reverse=not ascending
         )
         best = sorted_records[0]
+
+        # Mejor por combinación encoder × MIL
+        enc_mil_groups: dict = {}
+        for r in task_records:
+            key = f"{r['meta']['model']}_{r['meta']['mil']}"
+            enc_mil_groups.setdefault(key, []).append(r)
+
+        best["best_per_encoder_mil"] = {
+            key: sorted(group, key=lambda r: r[rank_metric], reverse=not ascending)[0]
+            for key, group in enc_mil_groups.items()
+        }
+        best["all_records"] = sorted_records
         best_per_task[task] = best
 
         if verbose:
@@ -296,72 +368,195 @@ def select_best_config(
             agg  = best["agg_metrics"]
             std  = agg.get(f"{rank_metric}_std", float("nan"))
             print(
-                f"\n{'='*60}\n"
-                f"  TAREA: {task}\n"
-                f"{'='*60}\n"
+                f"\n{'='*60}\n  TAREA: {task}\n{'='*60}\n"
                 f"  Ganador : {best['run_name']}\n"
-                f"  {rank_metric} (media±std) : "
-                f"{best[rank_metric]:.4f} ± {std:.4f}\n"
-                f"  Mejor época media  : {best.get('best_epoch', 'N/A')}\n"
-                f"  Encoder            : {meta['model']}\n"
-                f"  MIL                : {meta['mil']}\n"
-                f"  lr / wd            : {meta['lr']} / {meta['wd']}\n"
-                f"  optimizer          : {meta['optimizer']}\n"
-                f"  weighted_loss      : {meta['weighted_loss']}\n"
-                f"  batch_size         : {meta['batch_size']}\n"
-                f"  kfold              : {meta['kfold']}\n",
-                flush=True,
+                f"  {rank_metric}: {best[rank_metric]:.4f} ± {std:.4f}\n"
+                f"  best_epoch (media): {best.get('best_epoch', 'N/A')}\n"
+                f"  Encoder / MIL : {meta['model']} / {meta['mil']}\n"
+                f"  lr / wd       : {meta['lr']} / {meta['wd']}\n"
+                f"  optimizer     : {meta['optimizer']}\n"
+                f"  batch_size    : {meta['batch_size']}\n"
             )
+            enc_mil_sorted = sorted(
+                best["best_per_encoder_mil"].items(),
+                key=lambda kv: kv[1][rank_metric],
+                reverse=not ascending,
+            )
+            print("  ── Mejor por encoder x MIL ──")
+            for key, rec in enc_mil_sorted:
+                val = rec[rank_metric]
+                std = rec["agg_metrics"].get(f"{rank_metric}_std", float("nan"))
+                marker = "  ★" if rec["run_name"] == best["run_name"] else "   "
+                print(
+                    f"{marker} {key:50s}  "
+                    f"{rank_metric}={val:.4f} ± {std:.4f}  "
+                    f"epoch={rec.get('best_epoch', '?'):.1f}"
+                )
 
     return best_per_task
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GUARDADO EN JSON
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _record_to_entry(record: dict, rank_metric: str,
+                     metric_cols: Optional[list] = None) -> dict:
+    """Convierte un record interno a dict serializable para el JSON."""
+    if metric_cols is None:
+        metric_cols = DEFAULT_METRIC_COLS
+    meta = record["meta"]
+    agg  = record["agg_metrics"]
+    entry = {
+        "run_name":       record["run_name"],
+        "run_dir":        record["run_dir"],
+        "n_folds":        record["n_folds"],
+        "rank_metric":    rank_metric,
+        "rank_value":     record[rank_metric],
+        "rank_value_std": agg.get(f"{rank_metric}_std", float("nan")),
+        "best_epoch":     record.get("best_epoch"),
+        "hyperparams": {
+            "model":      meta["model"],
+            "freeze":     meta["freeze"],
+            "mil":        meta["mil"],
+            "optimizer":  meta["optimizer"],
+            "lr":         meta["lr"],
+            "wd":         meta["wd"],
+            "batch_size": meta["batch_size"],
+            "kfold":      meta["kfold"],
+        },
+        "metrics": {
+            col: agg[col]
+            for col in metric_cols
+            if col in agg
+        },
+    }
+    # Añadir std de cada métrica
+    for col in metric_cols:
+        std_key = f"{col}_std"
+        if std_key in agg:
+            entry["metrics"][std_key] = agg[std_key]
+    return entry
+
+
+def save_best_config_json(
+    best_per_task: dict,
+    task_results_path: str,
+    task: str,
+    rank_metric: str,
+    selected_enc_mil_key: Optional[str] = None,
+    metric_cols: Optional[list] = None,
+) -> str:
+    """
+    Guarda <task_results_path>/best_config.json con la selección de la mejor
+    configuración para una tarea.
+
+    Estructura del JSON
+    --------------------
+    {
+      "task":                str,
+      "rank_metric":         str,
+      "selected":            <entry>,   # config usada en test.py
+      "best_global":         <entry>,   # mejor global de la tarea
+      "ranking_encoder_mil": [<entry>], # mejor por encoder x MIL, ordenado
+      "full_ranking":        [<entry>], # Lista completa de experimentos, ordenados
+    }
+    """
+    if metric_cols is None:
+        metric_cols = DEFAULT_METRIC_COLS
+
+    os.makedirs(task_results_path, exist_ok=True)
+    best        = best_per_task[task]
+    enc_mil_map = best["best_per_encoder_mil"]
+    all_records = best["all_records"]
+
+    best_global_entry = _record_to_entry(best, rank_metric, metric_cols)
+
+    ranking_enc_mil = sorted(
+        [
+            {**_record_to_entry(rec, rank_metric, metric_cols),
+             "encoder_mil_key": key}
+            for key, rec in enc_mil_map.items()
+        ],
+        key=lambda e: e["rank_value"],
+        reverse=not False,  # ascending=False → mayor primero
+    )
+
+    full_ranking = [
+        {**_record_to_entry(rec, rank_metric, metric_cols),
+         "encoder_mil_key": f"{rec['meta']['model']}_{rec['meta']['mil']}"}
+        for rec in all_records
+    ]
+
+    if selected_enc_mil_key and selected_enc_mil_key in enc_mil_map:
+        selected = {
+            **_record_to_entry(enc_mil_map[selected_enc_mil_key], rank_metric, metric_cols),
+            "encoder_mil_key":  selected_enc_mil_key,
+            "selection_mode":   "manual_override",
+        }
+    else:
+        selected = {
+            **best_global_entry,
+            "encoder_mil_key": f"{best['meta']['model']}_{best['meta']['mil']}",
+            "selection_mode":  "auto_best_global",
+        }
+
+    output = {
+        "task":                task,
+        "rank_metric":         rank_metric,
+        "selected":            selected,
+        "best_global":         best_global_entry,
+        "ranking_encoder_mil": ranking_enc_mil,
+        "full_ranking":        full_ranking,
+    }
+
+    json_path = os.path.join(task_results_path, "best_config.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    return json_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONSTRUCCIÓN DE ARGS DEFINITIVOS
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-def build_final_args(base_args: SimpleNamespace, task: str, best: dict) -> SimpleNamespace:
+def build_final_args(
+    base_args: SimpleNamespace,
+    task: str,
+    best: dict,
+    encoder_mil_override: Optional[str] = None,
+) -> SimpleNamespace:
     """
-    Construye un Namespace de argumentos para el entrenamiento definitivo de
-    una tarea, partiendo de `base_args` y sobreescribiendo con la configuración
-    ganadora encontrada por `select_best_config`.
+    Construye los args para el entrenamiento definitivo de una tarea.
 
-    El número de épocas de entrenamiento definitivo se fija como la media de las
-    mejores épocas entre los folds (best['best_epoch']).  Si no está disponible,
-    se usa base_args.epochs como fallback.
-
-    Args
-    ----
-    base_args : SimpleNamespace — argumentos base (salida de argparse).
-    task      : str             — nombre de la tarea.
-    best      : dict            — entrada del dict devuelto por select_best_config.
-
-    Returns
-    -------
-    SimpleNamespace con los argumentos finales listos para el entrenamiento
-    definitivo.
+    Épocas: epochs_final = round(best_epoch_mean) + 1
+    (best_epoch es índice 0-based, media entre folds)
     """
-    import copy
     args = copy.deepcopy(base_args)
+    enc_mil_map = best["best_per_encoder_mil"]
 
-    meta = best["meta"]
+    if encoder_mil_override is not None:
+        if encoder_mil_override not in enc_mil_map:
+            raise ValueError(
+                f"Override '{encoder_mil_override}' no encontrado para '{task}'. "
+                f"Disponibles: {list(enc_mil_map.keys())}"
+            )
+        chosen = enc_mil_map[encoder_mil_override]
+        print(f"[build_final_args] Tarea '{task}': override '{encoder_mil_override}'")
+    else:
+        chosen = best
 
+    meta = chosen["meta"]
     args.task                 = task
     args.patch_model          = meta["model"]
     args.mil_aggregation_mode = meta["mil"]
     args.learning_rate        = meta["lr"]
     args.weight_decay         = meta["wd"]
     args.batch_size           = meta["batch_size"]
-    args.weighted_loss        = meta["weighted_loss"]
+    args.optimizer            = meta["optimizer"]
 
-    # Número de épocas definitivas = media de las mejores épocas por fold
-    # Se añade 1 porque los índices de época empiezan en 0
-    if "best_epoch" in best:
-        args.epochs = best["best_epoch"] + 1
-    # else: se respeta base_args.epochs
-
-    # Optimizer: SGD lleva momentum (se mantiene el del base_args ya que no
-    # está en el nombre de carpeta con la resolución necesaria)
-    args.optimizer = meta["optimizer"] if not meta["optimizer"].startswith("SGD") else "SGD"
+    if "best_epoch" in chosen:
+        args.epochs = int(round(chosen["best_epoch"])) + 1
 
     return args
