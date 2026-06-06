@@ -120,9 +120,9 @@ ALL_TASKS = [
 ]
 
 ALL_ENCODERS = [
-    # "uni",
-    # "dino",
-    # "keep",
+    "uni",
+    "dino",
+    "keep",
     "gigapath",
 ]
 

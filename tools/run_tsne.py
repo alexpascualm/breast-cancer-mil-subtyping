@@ -35,7 +35,7 @@ def parse_args():
         description="t-SNE sobre embeddings → HTML interactivo"
     )
     parser.add_argument("--patch_model",       type=str, default="dino",
-                        choices=["dino", "uni", "keep"])
+                        choices=["dino", "uni", "keep", "gigapath"])
     parser.add_argument("--embeddings_folder", type=str, default=bcnb_embeddings_path)
     parser.add_argument("--images_folder",     type=str, default=bcnb_images_folder_path)
     parser.add_argument("--df_path",           type=str, default=bcnb_labels_df_path)
@@ -152,7 +152,7 @@ def preprocess_and_reduce(embeddings, normalize_embs,
     # 3. t-SNE
     print(f"t-SNE: {X.shape[1]}D → 2D  (n={X.shape[0]}, perplexity={perplexity}) …",
           flush=True)
-    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter,
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, metric='cosine',
                 random_state=random_state, verbose=1)
     tsne_coords = tsne.fit_transform(X)
 
