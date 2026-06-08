@@ -446,6 +446,7 @@ def save_best_config_json(
     rank_metric: str,
     selected_enc_mil_key: Optional[str] = None,
     metric_cols: Optional[list] = None,
+    ascending: bool = False,
 ) -> str:
     """
     Guarda <task_results_path>/best_config.json con la selección de la mejor
@@ -479,7 +480,7 @@ def save_best_config_json(
             for key, rec in enc_mil_map.items()
         ],
         key=lambda e: e["rank_value"],
-        reverse=not False,  # ascending=False → mayor primero
+        reverse=not False,  # ascending=False → mayor primero, ascending=True → menor primero
     )
 
     full_ranking = [

@@ -403,6 +403,7 @@ if __name__ == "__main__":
                 rank_metric=args.rank_metric,
                 selected_enc_mil_key=enc_mil_key,
                 metric_cols=DEFAULT_METRIC_COLS,
+                ascending=args.rank_ascending,
             )
             print(f"\n  best_config.json → {json_path}")
 
