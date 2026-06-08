@@ -480,7 +480,7 @@ def save_best_config_json(
             for key, rec in enc_mil_map.items()
         ],
         key=lambda e: e["rank_value"],
-        reverse=not False,  # ascending=False → mayor primero, ascending=True → menor primero
+        reverse=not ascending,  # ascending=False → mayor primero, ascending=True → menor primero
     )
 
     full_ranking = [
