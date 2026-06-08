@@ -158,49 +158,6 @@ def preprocess_and_reduce(embeddings, normalize_embs,
 
     return tsne_coords, pre_tsne_space
 
-
-# ---------------------------------------------------------------------------
-# Silhouette Score (calculado en el espacio pre-t-SNE)
-# ---------------------------------------------------------------------------
-
-def compute_silhouette(pre_tsne_space, meta_df, color_col):
-    """
-    Calcula el Silhouette Score en el espacio de alta dimensión (pre-t-SNE).
-    Retorna un dict {col: score} para todas las columnas disponibles,
-    o solo para color_col si se prefiere.
-    """
-    if color_col not in meta_df.columns:
-        return {}
-
-    labels = meta_df[color_col].astype(str).values
-    unique = np.unique(labels)
-
-    if len(unique) < 2:
-        print(f"  Silhouette N/A para '{color_col}': solo {len(unique)} clase(s).", flush=True)
-        return {color_col: None}
-
-    # Subsampleo si hay demasiados puntos
-    MAX_N = 2000
-    n = len(pre_tsne_space)
-    if n > MAX_N:
-        idx    = np.random.default_rng(42).choice(n, size=MAX_N, replace=False)
-        X_sub  = pre_tsne_space[idx]
-        L_sub  = labels[idx]
-    else:
-        X_sub, L_sub = pre_tsne_space, labels
-
-    try:
-        score = silhouette_score(X_sub, L_sub, metric="euclidean")
-    except Exception as e:
-        print(f"  [WARN] Silhouette error para '{color_col}': {e}", flush=True)
-        score = None
-
-    print(f"  Silhouette Score (pre-t-SNE, '{color_col}'): "
-          f"{score:.4f}" if score is not None else "  Silhouette Score: N/A",
-          flush=True)
-    return {color_col: score}
-
-
 # ---------------------------------------------------------------------------
 # HTML
 # ---------------------------------------------------------------------------

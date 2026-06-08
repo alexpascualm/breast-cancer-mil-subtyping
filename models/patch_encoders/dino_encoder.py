@@ -1,11 +1,10 @@
 """
 models/patch_encoders/dino_encoder.py
 --------------------------------------
-Encoder ViT DINO / DINOv2 via timm.
+Encoder ViT DINO via timm.
 
 Modelos habituales:
     "vit_base_patch16_224.dino"        - ViT-B/16 DINO
-    "vit_large_patch14_dinov2.lvd142m" - ViT-L/14 DINOv2
 """
 
 import torch
@@ -16,7 +15,7 @@ from models.patch_encoders.base_encoder import BasePatchEncoder
 
 class DINOEncoder(BasePatchEncoder):
     """
-    Extractor de features ViT DINO/DINOv2.
+    Extractor de features ViT DINO.
 
     Args:
         chunk_size (int)           : mini-batch interno para control de VRAM.

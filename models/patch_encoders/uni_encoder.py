@@ -1,7 +1,7 @@
 """
 uni_encoder.py
 --------------
-Encoder basado en UNI (MahmoodLab/UNI - MahmoodLab/UNI2-h).
+Encoder basado en UNI (MahmoodLab/UNI).
 
 Requiere:
     pip install timm huggingface_hub
@@ -24,7 +24,7 @@ class UNIEncoder(BasePatchEncoder):
     Args:
         chunk_size (int)            : mini-batches internos de parches.
         unfreeze_backbone (bool)    : descongelar los últimos 3 bloques.
-        uni_model_name (str)        : repo HuggingFace ("MahmoodLab/UNI" o "MahmoodLab/UNI2-h").
+        uni_model_name (str)        : repo HuggingFace ("MahmoodLab/UNI").
         patch_size (int)            : resolución de entrada (px). UNI usa 224 por defecto.
     """
 
