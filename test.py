@@ -280,7 +280,7 @@ def run_final_training_and_test(
         t0 = time.time()
         _log(f"\n──── Epoch {epoch} ────")
 
-        train_metrics, train_conf_mat, train_loss, _ = run_epoch(
+        train_metrics, train_conf_mat, train_loss = run_epoch(
             model, train_loader, device, accelerator,
             criterion, optimizer, task=task, mode="train",
             precomputed_embeddings=precomputed,
@@ -304,7 +304,7 @@ def run_final_training_and_test(
     # ── Inferencia test ───────────────────────────────────────────────────────
     _log(f"\n{'─'*60}\n  TEST SET — tarea: {task}\n{'─'*60}")
 
-    test_metrics, test_conf_mat, test_loss, _ = run_epoch(
+    test_metrics, test_conf_mat, test_loss = run_epoch(
         model, test_loader, device, accelerator,
         criterion, None, task=task, mode="test",
         precomputed_embeddings=precomputed,

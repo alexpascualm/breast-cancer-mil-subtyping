@@ -529,7 +529,7 @@ def run_kfolds(
                 print(f"\n──── Fold {fold_i} · Epoch {epoch} ────", flush=True)
 
             # Train
-            train_metrics, train_conf_mat, train_loss, _ = run_epoch(
+            train_metrics, train_conf_mat, train_loss = run_epoch(
                 model, train_loader, device, accelerator,
                 criterion, optimizer, task=task, mode="train",
                 precomputed_embeddings=precomputed,
@@ -548,7 +548,7 @@ def run_kfolds(
                     f.write("\n\n")
 
             # Val
-            val_metrics, val_conf_mat, val_loss, _ = run_epoch(
+            val_metrics, val_conf_mat, val_loss = run_epoch(
                 model, val_loader, device, accelerator,
                 criterion, None, task=task, mode="val",
                 precomputed_embeddings=precomputed,
@@ -766,7 +766,7 @@ if __name__ == "__main__":
         print(
             f"\n{'='*60}\n"
             f"Validación cruzada completada para {exp_counter} experimentos.\n"
-            f"Fase de re-entrenamiento sobre dev completo pendiente de implementar.\n"
+            f"Fase de re-entrenamiento sobre dev completo pendiente de ejecutar.\n"
             f"{'='*60}",
             flush=True,
         )

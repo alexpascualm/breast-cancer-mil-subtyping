@@ -362,7 +362,6 @@ def run_epoch(
     optimizer=None,
     task: str = "molecular_subtype",
     mode: str = "train",
-    inference_heatmap: bool = False,
     precomputed_embeddings: bool = False
 ):
     """
@@ -377,14 +376,13 @@ def run_epoch(
         optimizer: optimizador (solo en mode='train').
         task (str): tarea activa — determina cómo interpretar etiquetas y métricas.
         mode (str): 'train' | 'val' | 'test'.
-        inference_heatmap (bool): si True, acumula info para generar heatmaps.
+
         precomputed_embeddings (bool): si True, el dataloader devuelve embeddings en vez de imágenes y se usa model.forward_from_embeddings().
 
     Returns:
         metrics (dict): métricas de la época.
         conf_mat_df (pd.DataFrame): matriz de confusión.
         epoch_loss (float): pérdida media.
-        heatmap_df (pd.DataFrame | None): DataFrame con info de heatmap o None.
     """
     assert mode in ("train", "val", "test")
 
@@ -409,11 +407,7 @@ def run_epoch(
             disable=not accelerator.is_main_process,
             file=sys.stdout,
         ):
-            if inference_heatmap:
-                inputs, labels, wsi_ids, coords = batch_info
-            else:
-                inputs, labels, wsi_ids, _ = batch_info
-
+            inputs, labels, wsi_ids, coords = batch_info
             labels = labels.to(device)
 
             if mode == "train":
@@ -458,34 +452,10 @@ def run_epoch(
                 all_y_pred.append(gat_preds.cpu())
                 all_y_prob.append(gat_probs.cpu())
 
-            # Heatmap: SOLO acumulación local (sin gather aquí)
-            if inference_heatmap:
-                for i in range(len(inputs)):
-                    # patch_logits_list[i] puede ser None en estrategias bag-based (transMIL)
-                    patch_scores = (
-                        torch.argmax(patch_logits_list[i], dim=1).cpu().numpy()
-                        if patch_logits_list[i] is not None
-                        else None
-                    )
-                    patch_weights = (
-                        weights_list[i].detach().cpu().numpy()
-                        if weights_list[i] is not None
-                        else None
-                    )
-                    heatmap_list.append({
-                        "wsi_id":       wsi_ids[i],
-                        "pred_label":   preds[i].item(),
-                        "true_label":   labels[i].item(),
-                        "coords":       coords[i],
-                        "patch_scores": patch_scores,
-                        "weights":      patch_weights,
-                    })
-
         epoch_loss = total_loss_sum / total_seen
 
         metrics = {}
         conf_mat_df = pd.DataFrame()
-        heatmap_df = None
 
         accelerator.wait_for_everyone()  # Asegura que todos han terminado antes de procesar métricas y heatmaps
         if accelerator.is_main_process:
@@ -502,14 +472,4 @@ def run_epoch(
                 columns=[f"pred_{i}" for i in range(conf_mat.shape[1])],
             )
 
-        # Gather heatmaps al final
-        if inference_heatmap:
-            gathered_heatmaps = accelerator.gather_object(heatmap_list)
-
-            if accelerator.is_main_process:
-                # flatten lista de listas
-                flat_heatmaps = [item for sublist in gathered_heatmaps for item in sublist]
-                flat_heatmaps = sorted(flat_heatmaps, key=lambda x: x["wsi_id"])
-                heatmap_df = pd.DataFrame(flat_heatmaps)
-
-    return metrics, conf_mat_df, epoch_loss, heatmap_df
+    return metrics, conf_mat_df, epoch_loss

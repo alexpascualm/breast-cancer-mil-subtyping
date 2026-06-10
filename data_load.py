@@ -124,8 +124,6 @@ class Patches_WSI_Dataset(Dataset):
     load_on_demand : bool
         False → pre-load all patch tensors into CPU RAM.
         True  → read H5 in __getitem__ (lower RAM, slower I/O).
-    inference_heatmap : bool
-        If True, also return patch coordinates from H5.
     """
     SUPPORTED_TASKS = ('molecular_subtype', 'er', 'pr', 'her2', 'ki67')
 
@@ -136,7 +134,6 @@ class Patches_WSI_Dataset(Dataset):
         task: str = 'molecular_subtype',
         patch_resize_size: int = 224,
         load_on_demand: bool = False,
-        inference_heatmap: bool = False,
     ):
         if task not in self.SUPPORTED_TASKS:
             raise ValueError(f"task must be one of {self.SUPPORTED_TASKS}, got '{task}'")
@@ -147,7 +144,6 @@ class Patches_WSI_Dataset(Dataset):
         self.task              = task
         self.patch_resize_size = patch_resize_size
         self.load_on_demand    = bool(load_on_demand)
-        self.inference_heatmap = bool(inference_heatmap)
 
         self.transform = T.Compose([
             T.Resize((patch_resize_size, patch_resize_size), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
@@ -170,7 +166,7 @@ class Patches_WSI_Dataset(Dataset):
                 fpath = row['features']
                 with h5py.File(fpath, "r") as h5:
                     imgs   = h5["imgs"][:]
-                    coords = h5["coords"][:] if self.inference_heatmap else None
+                    coords = h5["coords"][:]
 
                 imgs_tensor = torch.stack([self.transform(Image.fromarray(img)) for img in imgs])
                 self.images.append(imgs_tensor)
@@ -195,20 +191,19 @@ class Patches_WSI_Dataset(Dataset):
         if not self.load_on_demand:
             imgs_tensor = self.images[idx]
             wsi_id    = self.wsi_ids[idx]
-            coords      = self.coords[idx] if self.inference_heatmap else None
+            coords      = self.coords[idx]
         else:
             fpath    = self.feature_paths[idx]
             wsi_id = fpath
             coords   = None
             with h5py.File(fpath, "r") as h5:
                 imgs = h5["imgs"][:]
-                if self.inference_heatmap:
-                    coords = h5["coords"][:]
+                coords = h5["coords"][:]
             imgs_tensor = torch.stack([self.transform(Image.fromarray(img)) for img in imgs])
 
-        if self.inference_heatmap:
-            return imgs_tensor, label, wsi_id, coords
-        return imgs_tensor, label, wsi_id
+        
+        return imgs_tensor, label, wsi_id, coords
+        
 
     # ── Convenience ───────────────────────────────────────────────────────────
     @property
@@ -244,7 +239,6 @@ class Embeddings_WSI_Dataset(Dataset):
         Con embeddings (floats) el tamaño en RAM es mucho menor
         que con imágenes, así que load_on_demand=False es viable
         incluso para datasets grandes.
-    inference_heatmap : bool
     """
 
     SUPPORTED_TASKS = ('molecular_subtype', 'er', 'pr', 'her2', 'ki67')
@@ -256,7 +250,6 @@ class Embeddings_WSI_Dataset(Dataset):
         embeddings_folder: str,
         task: str = 'molecular_subtype',
         load_on_demand: bool = False,
-        inference_heatmap: bool = False,
     ):
         if task not in self.SUPPORTED_TASKS:
             raise ValueError(f"task must be one of {self.SUPPORTED_TASKS}")
@@ -266,7 +259,6 @@ class Embeddings_WSI_Dataset(Dataset):
         self.embeddings_folder = embeddings_folder
         self.task              = task
         self.load_on_demand    = load_on_demand
-        self.inference_heatmap = inference_heatmap
 
         # Construir rutas a los .h5 de embeddings
         self.emb_paths = []
@@ -317,13 +309,13 @@ class Embeddings_WSI_Dataset(Dataset):
 
         if not self.load_on_demand:
             emb    = self.embeddings_cache[idx]
-            coords = self.coords_cache[idx] if self.inference_heatmap else None
+            coords = self.coords_cache[idx]
         else:
             emb, coords = self._read_h5(self.emb_paths[idx])
 
-        if self.inference_heatmap:
-            return emb, label, wsi_id, coords
-        return emb, label, wsi_id
+        
+        return emb, label, wsi_id, coords
+       
 
     @property
     def num_classes(self) -> int:
@@ -336,100 +328,16 @@ class Embeddings_WSI_Dataset(Dataset):
 # ──────────────────────────────────────────────────────────────────────────────
 def collate_fn(batch):
     """
-    Handles batches of (imgs/embeddings, label, wsi_id) or (imgs/embeddings, label, wsi_id, coords).
+    Handles batches of imgs/embeddings, label, wsi_id, coords).
     Returns:
         list_features  - list of per-WSI tensors
         labels         - stacked LongTensor  [B] or [B, ...]
-        wsi_ids      - list or None
-        coords         - list or None
+        wsi_ids      - list of WSI identifiers 
+        coords         - list coords arrays
     """
-    if len(batch[0]) == 3:
-        features, labels, wsi_ids = zip(*batch)
-        return list(features), torch.stack(labels, dim=0), list(wsi_ids), None
-    elif len(batch[0]) == 4:
+    if len(batch[0]) == 4:
         features, labels, wsi_ids, coords = zip(*batch)
         return list(features), torch.stack(labels, dim=0), list(wsi_ids), list(coords)
+
     else:
         raise ValueError(f"Unexpected batch structure with {len(batch[0])} elements.")
-    
-
-# ──────────────────────────────────────────────────────────────────────────────
-# USAGE EXAMPLE AND QA
-# ──────────────────────────────────────────────────────────────────────────────
-if __name__ == '__main__':
-    from torch.utils.data import DataLoader
-
-    IMAGES_PATH = '/data/BCNB/patches/patches'
-    DATA_PATH   = '/data/BCNB/patient-clinical-data.xlsx'
-    SLIDE_COL   = 'Patient ID'   # column in Excel matching .h5 stem
-
-    # 1. Build master DataFrame (call once, reuse for all tasks)
-    df = create_file_label_df(
-        images_path=IMAGES_PATH,
-        data_path=DATA_PATH,
-        slide_col=SLIDE_COL,
-        small_dataset_for_test=True,
-        ki67_threshold=0.14,
-    )
-    print(df.head())
-    print("\nMolecular subtype (Codes) distribution:\n", df['molecular_subtype'].value_counts())
-    print("\nMolecular subtype (Names) distribution:\n", df['molecular_subtype_str'].value_counts())
-    print("\nKi67 binary distribution:\n", df['ki67'].value_counts())
-    print("\nER binary distribution:\n", df['er'].value_counts())
-    print("\nPR binary distribution:\n", df['pr'].value_counts())
-    print("\nHER2 binary distribution:\n", df['her2'].value_counts())
-
-    all_idx = list(range(len(df)))
-
-    # 2. Molecular subtype (4-class) con heatmap activado
-    ds_subtype = Patches_WSI_Dataset(df, all_idx, task='molecular_subtype',
-                                   load_on_demand=True, inference_heatmap=True)
-    print(f"\nSubtype  → size={len(ds_subtype)}, num_classes={ds_subtype.num_classes}")
-
-    # 3. Shape de parches, coordenadas, patch IDs y estadísticas
-    print("\n── Shape de un parche individual:")
-    sample_imgs, sample_label, sample_wsi_id, sample_coords = ds_subtype[0]
-    print(f"   Tensor por WSI : {sample_imgs.shape}  →  (num_parches, C, H, W)")
-    print(f"   Un parche      : {sample_imgs[0].shape}  →  (C, H, W)")
-
-    print("\n── Test coordenadas y patch IDs (primeras 5 WSIs):")
-    for i in range(min(5, len(ds_subtype))):
-        imgs, label, wsi_id, coords = ds_subtype[i]
-        print(f"\n   WSI {i}")
-        print(f"   wsi_id     : {wsi_id}")
-        print(f"   label        : {label.item()} ({df.iloc[i]['molecular_subtype_str']})")
-        print(f"   imgs shape   : {imgs.shape}  → (num_parches, C, H, W)")
-        if coords is not None:
-            coords_arr = np.array(coords)
-            print(f"   coords shape : {coords_arr.shape}  → (num_parches, 2)")
-        else:
-            print("   coords       : None (el H5 no tiene dataset 'coords')")
-
-    print("\n── Estadísticas de número de parches por WSI:")
-    n_patches = np.array([ds_subtype[i][0].shape[0] for i in range(len(ds_subtype))])
-    print(f"   Total WSIs   : {len(n_patches)}")
-    print(f"   Min parches  : {n_patches.min()}")
-    print(f"   Max parches  : {n_patches.max()}")
-    print(f"   Media        : {n_patches.mean():.1f}")
-    print(f"   Mediana      : {np.median(n_patches):.1f}")
-    print(f"   Std          : {n_patches.std():.1f}")
-    print(f"   Percentil 25 : {np.percentile(n_patches, 25):.1f}")
-    print(f"   Percentil 75 : {np.percentile(n_patches, 75):.1f}")
-
-    # 4. Individual biomarker models (binary each)
-    print("\n── Biomarker datasets:")
-    for biomarker in ('er', 'pr', 'her2', 'ki67'):
-        valid_idx = [i for i in all_idx if df.iloc[i][biomarker] != -1]
-        ds = Patches_WSI_Dataset(df, valid_idx, task=biomarker, load_on_demand=True)
-        pos = df.iloc[valid_idx][biomarker].sum()
-        print(f"   {biomarker.upper():5s} → size={len(ds)}, num_classes={ds.num_classes}, "
-              f"positive={int(pos)}/{len(valid_idx)}")
-
-    # 5. DataLoader
-    print("\n── Batch DataLoader:")
-    loader = DataLoader(ds_subtype, batch_size=4, shuffle=True, collate_fn=collate_fn)
-    imgs, labels, wsi_ids, coords = next(iter(loader))
-    print(f"   WSIs en batch : {len(imgs)}")
-    print(f"   labels        : {labels}")
-    print(f"   wsi_ids     : {wsi_ids}")
-    
