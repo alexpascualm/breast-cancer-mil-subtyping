@@ -298,7 +298,12 @@ def run_final_training_and_test(
     # ── Guardar modelo ────────────────────────────────────────────────────────
     accelerator.wait_for_everyone()
     if accelerator.is_main_process and args.save_models:
-        accelerator.save_state(model_path)
+        unwrapped_model = accelerator.unwrap_model(model)
+        os.makedirs(model_path, exist_ok=True)
+        torch.save(
+            unwrapped_model.state_dict(),
+            os.path.join(model_path, "model.pt")
+        )
         _log(f"\n  Modelo guardado en: {model_path}")
 
     # ── Inferencia test ───────────────────────────────────────────────────────
