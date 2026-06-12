@@ -171,7 +171,7 @@ class TransMIL(BaseMIL):
     
 
         # 3. CLS token
-        cls = self.cls_token.to(h.device)   # (1, 1, dim_model)
+        cls = self.cls_token  # (1, 1, dim_model)
         h = torch.cat([cls, h], dim=1)      # (1, N_pad+1, dim_model)
 
         # 4. TransLayer 1 — correlación morfológica entre instancias

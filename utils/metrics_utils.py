@@ -134,13 +134,15 @@ def compute_binary_metrics(y_true, y_pred, y_prob):
 
     # --- Métricas con probabilidades ---
     try:
-        y_prob_pos = y_prob[:, 1]  # para auroc y auprc_pos/neg
+        y_prob_pos = y_prob[:, 1]  # para auroc y auprc_pos
+        y_prob_neg = y_prob[:, 0]   # probabilidad directa de la clase negativa
+
         # AUROC (clase positiva)
         metrics["auroc"] = roc_auc_score(y_true, y_prob_pos)
 
         # AUPRC para ambas clases
         metrics["auprc_pos"] = average_precision_score(y_true, y_prob_pos)
-        metrics["auprc_neg"] = average_precision_score(1 - y_true, 1 - y_prob_pos)
+        metrics["auprc_neg"] = average_precision_score(1 - y_true, y_prob_neg)
 
         # AUPRC macro / weighted
         y_true_ohe = np.eye(2)[y_true]
@@ -243,14 +245,16 @@ def log_epoch_metrics(epoch, split_name, task, metrics, loss, output_path):
         lines.append(f"    Precision         : {metrics['precision_pos']:.4f}")
         lines.append(f"    Recall            : {metrics['recall_pos']:.4f}")
         lines.append(f"    F1                : {metrics['f1_pos']:.4f}")
-        lines.append(f"    AUPRC             : {metrics['auprc_pos']:.4f}")
+        if "auprc_pos" in metrics:
+            lines.append(f"    AUPRC             : {metrics['auprc_pos']:.4f}")
 
     if "precision_neg" in metrics:
         lines.append("  --- Clase negativa (0) ---")
         lines.append(f"    Precision         : {metrics['precision_neg']:.4f}")
         lines.append(f"    Recall (Spec.)    : {metrics['recall_neg']:.4f}")
         lines.append(f"    F1                : {metrics['f1_neg']:.4f}")
-        lines.append(f"    AUPRC             : {metrics['auprc_neg']:.4f}")
+        if "auprc_neg" in metrics:
+            lines.append(f"    AUPRC             : {metrics['auprc_neg']:.4f}")
 
     
     # ── Classification report (multiclase) ────────────────────────────────────

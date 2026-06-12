@@ -166,7 +166,7 @@ class Patches_WSI_Dataset(Dataset):
                 fpath = row['features']
                 with h5py.File(fpath, "r") as h5:
                     imgs   = h5["imgs"][:]
-                    coords = h5["coords"][:]
+                    coords = h5["coords"][:] if "coords" in h5 else None
 
                 imgs_tensor = torch.stack([self.transform(Image.fromarray(img)) for img in imgs])
                 self.images.append(imgs_tensor)
@@ -198,10 +198,9 @@ class Patches_WSI_Dataset(Dataset):
             coords   = None
             with h5py.File(fpath, "r") as h5:
                 imgs = h5["imgs"][:]
-                coords = h5["coords"][:]
+                coords = h5["coords"][:] if "coords" in h5 else None
             imgs_tensor = torch.stack([self.transform(Image.fromarray(img)) for img in imgs])
 
-        
         return imgs_tensor, label, wsi_id, coords
         
 

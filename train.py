@@ -139,6 +139,7 @@ ALL_MIL_MODES = [
 ALL_LEARNING_RATES = [
     1e-3,
     1e-4,
+    1e-5
 ]
 
 ALL_WEIGHT_DECAYS = [
@@ -407,7 +408,6 @@ def run_kfolds(
     exp_log_path = os.path.join(exp_results_path, "experiment_log.txt")
 
     # ── Log global del experimento ────────────────────────────────────────────
-    exp_log_path = os.path.join(exp_results_path, "experiment_log.txt")
     if accelerator.is_main_process:
         with open(exp_log_path, "a") as f:
             f.write(kfold_report_str + "\n\n")

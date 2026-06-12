@@ -204,8 +204,8 @@ def get_model(
         Requiere usar WSIClassifier.forward_from_embeddings() en lugar de forward().
 
     Args:
-        patch_encoder_type (str) : 'dino' | 'uni' | 'keep' .
-        mil_aggregation_mode (str): 'max' | 'mean' | 'abMIL-instance-level' | 'abMIL-bag-level' | 'transMIL'.
+        patch_encoder_type (str) : Encoder fundacional de entre los soportados por WSIClassifier.
+        mil_aggregation_mode (str): Modo de agregación de entre los soportados por WSIClassifier.
         unfreeze_backbone (bool) : descongelar últimos bloques del backbone (ignorado si skip_encoder=True).
         num_classes (int)        : número de clases de salida.
         chunk_size (int)         : mini-batch interno de parches (ignorado si skip_encoder=True).
