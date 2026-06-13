@@ -80,75 +80,7 @@ class _PPEG(nn.Module):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Módulo de atención cruzada CLS → parches (solo interpretabilidad)
-# ──────────────────────────────────────────────────────────────────────────────
-
-class _CLSCrossAttention(nn.Module):
-    """
-    Cross-attention de un único paso: el CLS token actúa como query
-    y los patch tokens como keys/values.
-
-    Produce un peso escalar por parche que indica cuánto contribuye
-    cada uno a la representación del CLS, de forma análoga a la
-    atención en ViT/DINO para interpretabilidad.
-
-    IMPORTANTE: Este módulo se llama siempre bajo torch.no_grad()
-    desde TransMIL.forward(). Sus parámetros NO reciben gradiente
-    de la loss de clasificación.
-    Args:
-        dim   : dimensión del espacio de tokens (= dim_model).
-        heads : número de cabezas de atención (por defecto 8).
-    """
-
-    def __init__(self, dim: int = 512, heads: int = 8):
-        super().__init__()
-        assert dim % heads == 0, "dim debe ser divisible por heads"
-        self.heads    = heads
-        self.dim_head = dim // heads
-        self.scale    = self.dim_head ** -0.5
-
-        self.to_q   = nn.Linear(dim, dim, bias=False)
-        self.to_k   = nn.Linear(dim, dim, bias=False)
-        self.to_v   = nn.Linear(dim, dim, bias=False)
-        self.to_out = nn.Linear(dim, dim, bias=False)
-
-    def forward(
-        self,
-        cls_token:    torch.Tensor,  # (1, 1,     dim)
-        patch_tokens: torch.Tensor,  # (1, N_pad, dim)
-    ) -> torch.Tensor:
-        """
-        Devuelve:
-            weights : (N_pad,) — pesos de atención promediados entre cabezas.
-
-        Solo devuelve los pesos; el CLS enriquecido NO se usa fuera de aquí.
-        """
-        H = self.heads
-        D = self.dim_head
-
-        q = self.to_q(cls_token)     # (1, 1,     dim)
-        k = self.to_k(patch_tokens)  # (1, N_pad, dim)
-        v = self.to_v(patch_tokens)  # (1, N_pad, dim)
-
-        def split_heads(t: torch.Tensor) -> torch.Tensor:
-            B_, S, _ = t.shape
-            return t.view(B_, S, H, D).transpose(1, 2)  # (B, H, S, D)
-
-        q = split_heads(q)  # (1, H, 1,     D)
-        k = split_heads(k)  # (1, H, N_pad, D)
-        v = split_heads(v)  # (1, H, N_pad, D)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (1, H, 1, N_pad)
-        attn   = scores.softmax(dim=-1)
-
-        # Promedio entre cabezas → (N_pad,)
-        weights = attn.mean(dim=1).squeeze(0).squeeze(0)
-
-        return weights
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  Módulo TransMIL adaptado a BaseMIL — fiel al paper, con interpretabilidad opcional
+#  Módulo TransMIL adaptado a BaseMIL — fiel al paper, con interpretabilidad
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TransMIL(BaseMIL):
@@ -163,20 +95,28 @@ class TransMIL(BaseMIL):
         5. PPEG (positional encoding condicional).
         6. TransLayer2 (segunda ronda de correlación).
         7. LayerNorm → extrae CLS token.
-        8. Clasificador MLP sobre el CLS token.  ← igual que el paper
-        9. (Extra no presente en el paper) CLSCrossAttention sobre los patch tokens procesados,
-           bajo no_grad, solo para devolver pesos de interpretabilidad.
+        8. Clasificador MLP sobre el CLS token.
 
-         IMPORTANTE: ignora patch_logits — agrega en el espacio de features.
+    Interpretabilidad (sin parámetros entrenables):
+        Los pesos por parche se obtienen como la similitud coseno entre el
+        CLS token procesado y cada patch token procesado, ambos extraídos
+        tras el LayerNorm final.
+
+        Justificación: el CLS token es la representación de la bolsa entera
+        que el clasificador usa directamente. Su similitud con cada patch token
+        —en el espacio aprendido por el modelo— mide cuánto se "parece" cada
+        parche a esa representación agregada, lo que es una proxy directa de
+        contribución. No se introduce ningún parámetro extra: los únicos pesos
+        que influyen son los del modelo principal, entrenados end-to-end con
+        la loss de clasificación.
 
     Args:
-        num_classes (int)      : número de clases de salida.
-        embed_dim (int)        : dimensión de los embeddings del encoder (entrada).
-        dim_model (int)        : dimensión interna del Transformer (default 512).
-        ca_heads (int)         : cabezas de la cross-attention (default 8).
+        num_classes (int)  : número de clases de salida.
+        embed_dim   (int)  : dimensión de los embeddings del encoder (entrada).
+        dim_model   (int)  : dimensión interna del Transformer (default 512).
     """
 
-    def __init__(self, num_classes: int, embed_dim: int, dim_model: int  = 512, ca_heads: int  = 8):
+    def __init__(self, num_classes: int, embed_dim: int, dim_model: int = 512):
         super().__init__(num_classes=num_classes, embed_dim=embed_dim)
 
         self.dim_model = dim_model
@@ -203,11 +143,57 @@ class TransMIL(BaseMIL):
         # ── Normalización final ───────────────────────────────────────────────
         self.norm = nn.LayerNorm(dim_model)
 
-        # ── Clasificador de WSI (sobre CLS token directo, igual que el paper) ─
+        # ── Clasificador de WSI (sobre CLS token, igual que el paper) ─────────
         self.bag_classifier = nn.Linear(dim_model, num_classes)
 
-        # ── Cross-attention opcional (solo interpretabilidad) ─────────────────
-        self.cross_attn = _CLSCrossAttention(dim=dim_model, heads=ca_heads)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _cosine_attention_weights(
+        cls_token:    torch.Tensor,   # (1, 1,     D)
+        patch_tokens: torch.Tensor,   # (1, N_pad, D)
+    ) -> torch.Tensor:
+        """
+        Calcula pesos de atención como similitud coseno entre el CLS token
+        y cada patch token, seguida de un softmax para normalizar a [0, 1].
+
+        No contiene ningún parámetro entrenable: la única información que
+        usa son las representaciones aprendidas por el modelo principal.
+
+        Por qué similitud coseno y no producto escalar (dot-product):
+            - El producto escalar mezcla magnitud y ángulo, por lo que parches
+              con norma alta parecerían más "importantes" independientemente de
+              su orientación respecto al CLS. La similitud coseno aísla la
+              componente direccional, que es lo semánticamente relevante.
+            - En espacios de alta dimensión los vectores tienden a tener normas
+              similares, pero normalizar explícitamente elimina cualquier sesgo.
+
+        Por qué softmax sobre los scores coseno y no los scores crudos:
+            - Normalizar con softmax convierte los scores en una distribución
+              de probabilidad sumando 1, directamente interpretable como
+              "fracción de atención" por parche.
+            - Temperatura implícita: los scores coseno están acotados en [-1,1],
+              lo que da un softmax con temperatura natural, sin colapsar en
+              distribuciones demasiado peaked ni demasiado uniformes.
+
+        Args:
+            cls_token    : (1, 1, D)     — CLS tras LN final.
+            patch_tokens : (1, N_pad, D) — patches tras LN final.
+
+        Returns:
+            weights : (N_pad,) — pesos en [0, 1] sumando 1.
+        """
+        # Normalizar L2 para obtener similitud coseno pura
+        cls_norm   = F.normalize(cls_token,    dim=-1)   # (1, 1,     D)
+        patch_norm = F.normalize(patch_tokens, dim=-1)   # (1, N_pad, D)
+
+        # Similitud coseno: (1, 1, D) x (1, D, N_pad) → (1, 1, N_pad)
+        cos_sim = torch.matmul(cls_norm, patch_norm.transpose(-2, -1))
+
+        # Softmax sobre la dimensión de parches → distribución de atención
+        weights = cos_sim.softmax(dim=-1)   # (1, 1, N_pad)
+
+        return weights.squeeze(0).squeeze(0)  # (N_pad,)
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -225,7 +211,10 @@ class TransMIL(BaseMIL):
 
         Returns:
             wsi_logit : Tensor (num_classes,).
-            weights   : Tensor (N,) con pesos de atención por parche en el mismo orden que feats_ws (sin padding)
+            weights   : Tensor (N,) — pesos de atención por parche en el mismo
+                        orden que feats_ws (sin padding), sumando 1.
+                        Interpretación: el parche i contribuye una fracción
+                        weights[i] a la representación final de la bolsa.
         """
         if feats_ws.numel() == 0:
             return torch.zeros(self.num_classes, device=feats_ws.device), None
@@ -257,24 +246,34 @@ class TransMIL(BaseMIL):
         h = self.pos_layer(h, _H, _W)      # (1, N_pad+1, dim_model)
 
         # 6. TransLayer 2 — correlación profunda
-        h = self.layer2(h)                # (1, N_pad+1, dim_model)
+        h = self.layer2(h)                 # (1, N_pad+1, dim_model)
 
-        # 7. LayerNorm y extracción del CLS token
-        h_norm        = self.norm(h)
-        cls_token_out  = h_norm[:, :1, :]  # (1, 1, dim_model)
-        patch_tokens   = h_norm[:, 1:, :]  # (1, N_pad, dim_model)
+        # 7. LayerNorm final
+        #    Aquí es donde se extraen las representaciones para interpretabilidad:
+        #    tanto el CLS como los patches han pasado por todo el modelo y están
+        #    en el mismo espacio normalizado que usa el clasificador.
+        h_norm       = self.norm(h)
+        cls_token_out = h_norm[:, :1, :]   # (1, 1,     dim_model)
+        patch_tokens  = h_norm[:, 1:, :]   # (1, N_pad, dim_model)
 
-        # 8. Clasificador de WSI — SOBRE EL CLS DIRECTO (fiel al paper)
-        #    MLP(LN(CLS)) exactamente como en el Algoritmo 2 de Shao et al.
+        # 8. Clasificador de WSI — MLP(LN(CLS)), fiel al paper (Algorithm 2, paso 5)
         wsi_logit = self.bag_classifier(cls_token_out.squeeze(0)).squeeze(0)
 
-        # 9. Pesos de interpretabilidad via cross-attention
-        #    Ejecutado bajo no_grad: NUNCA afecta gradientes ni el entrenamiento.
-        weights = None
+        # 9. Pesos de interpretabilidad — similitud coseno sin parámetros entrenables
+        #
+        #    Se calcula bajo no_grad porque:
+        #      a) No aporta información nueva al grafo de cómputo (los tensores
+        #         h_norm ya están en el grafo si hace falta backprop).
+        #      b) Evita almacenar activaciones intermedias innecesarias en memoria
+        #         durante el entrenamiento.
+        #
+        #    El resultado es determinista dado el estado del modelo: para un modelo
+        #    entrenado, siempre producirá los mismos pesos para la misma WSI.
         with torch.no_grad():
-            weights_padded = self.cross_attn(cls_token_out, patch_tokens)
-            # Recortar padding y renormalizar
+            weights_padded = self._cosine_attention_weights(cls_token_out, patch_tokens)
+            # Recortar tokens de padding — solo nos interesan los N_orig originales
             weights = weights_padded[:N_orig]
+            # Renormalizar tras el recorte para que sigan sumando 1
             weights = weights / (weights.sum() + 1e-8)
 
         return wsi_logit, weights
