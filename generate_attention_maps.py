@@ -1,16 +1,13 @@
 """
 generate_attention_maps.py
 --------------------------
-Genera mapas de atención para WSIs usando modelos entrenados con test.py.
-sSolo funciona con modelos entrenados con abMIL-bag-level.
+Genera mapas de atención para WSIs usando modelos entrenados y guardados en test.py.
+Solo funciona con modelos que proporcionen pesos de atención por parche.
 
 Para cada WSI seleccionada y cada tarea produce tres imágenes:
   1. WSI reconstruida (rescalada a resolución visualizable)
   2. Máscara de atención (parches coloreados por peso de atención)
   3. Fusión de WSI + máscara de atención
-
-Solo funciona con modelos entrenados con abMIL-bag-level. Las demás estrategias
-MIL se saltan con un aviso.
 
 Estructura de salida
 --------------------
@@ -109,7 +106,7 @@ class TeeLogger:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Genera mapas de atención para WSIs con modelos abMIL-bag-level"
+        description="Genera mapas de atención para WSIs con modelos que proporcionen pesos de atención por parche."
     )
 
     # Rutas obligatorias
@@ -184,7 +181,9 @@ def parse_args():
 # ──────────────────────────────────────────────────────────────────────────────
 
 # MIL compatible con mapas de atención (los demás se omiten)
-SUPPORTED_MIL = "abMIL-bag-level"
+SUPPORTED_MIL = ["abMIL-bag-level",
+                "abMIL-instance-level",
+                "transMIL"]
 
 # Colormap para la máscara de atención (rojo = alta atención)
 # Se aplica manualmente para evitar dependencia de matplotlib
@@ -361,8 +360,8 @@ def load_trained_model(
     enc_name = hyperparams["model"]
     mil_mode = hyperparams["mil"]
 
-    # Solo abMIL-bag-level soportado
-    if mil_mode != SUPPORTED_MIL:
+    # Se descartan modelos sin pesos de atención (no compatibles con mapas de atención)
+    if mil_mode not in SUPPORTED_MIL:
         raise ValueError(
             f"[{task}] Estrategia MIL '{mil_mode}' no soportada para mapas de atención. "
             f"Solo se genera mapa para '{SUPPORTED_MIL}'."
@@ -769,7 +768,7 @@ def _run(args):
         enc_name    = hyperparams["model"]
         mil_mode    = hyperparams["mil"]
 
-        if mil_mode != SUPPORTED_MIL:
+        if mil_mode not in SUPPORTED_MIL:
             print(f"  [SKIP] MIL '{mil_mode}' no soportado (requiere '{SUPPORTED_MIL}').")
             continue
 
