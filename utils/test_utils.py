@@ -19,6 +19,11 @@ empate a centésimas, gana la configuración con menor std en rank_metric.
 Si también hay empate en el std, se usa el valor exacto de rank_metric como
 desempate final.
 
+Este criterio se aplica de forma consistente en:
+  - select_best_config       (selección del mejor global y mejor por encoder x MIL)
+  - save_best_config_json    (ranking_encoder_mil y full_ranking del JSON)
+  - collect_all_runs_df       (DataFrame maestro usado por el notebook)
+
 Estructura del JSON generado por save_best_config_json
 -------------------------------------------------------
 {
@@ -201,23 +206,25 @@ def load_and_aggregate_run(run_dir: str, rank_metric: str) -> Optional[dict]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CRITERIO DE ORDENACIÓN / DESEMPATE
+#
+# Criterio (de mayor a menor prioridad):
+#   1. rank_metric redondeado a 2 decimales (centésimas).
+#   2. std de rank_metric — siempre menor std es mejor, independientemente
+#      de si 'ascending' es True o False.
+#   3. valor exacto de rank_metric (desempate final).
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _record_sort_key(record: dict, rank_metric: str, ascending: bool) -> tuple:
     """
-    Clave de ordenación para records internos (de select_best_config).
-
-    Orden:
-      1. rank_metric redondeado a 2 decimales (centésimas).
-      2. std de rank_metric (siempre: menor std es mejor, sea ascending o no).
-      3. valor exacto de rank_metric (desempate final).
+    Clave de ordenación para records internos de select_best_config
+    (dicts con record[rank_metric] y record["agg_metrics"]).
 
     La tupla resultante se ordena de forma ascendente (sorted normal), de modo
     que el primer elemento sea siempre la mejor configuración.
     """
     val = record[rank_metric]
     std = record["agg_metrics"].get(f"{rank_metric}_std", float("inf"))
-    if math.isnan(std):
+    if std is None or (isinstance(std, float) and math.isnan(std)):
         std = float("inf")
 
     rounded = round(val, 2)
@@ -251,6 +258,44 @@ def _entry_sort_key(entry: dict, ascending: bool) -> tuple:
         return (-rounded, std, -val)
 
 
+def _sort_df_by_rank(df: pd.DataFrame, rank_metric: str, ascending: bool) -> pd.DataFrame:
+    """
+    Ordena un DataFrame con columnas 'rank_value' y '<rank_metric>_std'
+    aplicando el mismo criterio que _record_sort_key / _entry_sort_key:
+      1. rank_value redondeado a 2 decimales.
+      2. menor std de rank_metric (siempre, independientemente de 'ascending').
+      3. rank_value exacto, como desempate final.
+
+    Usada por collect_all_runs_df (DataFrame maestro del notebook) y,
+    opcionalmente, por el propio notebook para reordenar sub-DataFrames
+    (p. ej. el "mejor por combinación encoder x MIL") con el mismo criterio.
+
+    Si el DataFrame está vacío o no tiene 'rank_value', se devuelve sin tocar.
+    """
+    if df.empty or "rank_value" not in df.columns:
+        return df.reset_index(drop=True)
+
+    std_col = f"{rank_metric}_std"
+    tmp = df.copy()
+    tmp["_rounded"] = tmp["rank_value"].round(2)
+    tmp["_std"] = tmp[std_col] if std_col in tmp.columns else float("inf")
+    tmp["_std"] = tmp["_std"].astype(float).fillna(float("inf"))
+
+    sort_cols = ["_rounded", "_std", "rank_value"]
+    if ascending:
+        ascending_flags = [True, True, True]
+    else:
+        # mayor rank_value es mejor → orden descendente en _rounded y rank_value,
+        # pero el std siempre ordenado ascendente (menor std primero)
+        ascending_flags = [False, True, False]
+
+    return (
+        tmp.sort_values(sort_cols, ascending=ascending_flags, na_position="last")
+        .drop(columns=["_rounded", "_std"])
+        .reset_index(drop=True)
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTRUCCIÓN DEL DATAFRAME MAESTRO (usado por el notebook)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,7 +310,8 @@ def collect_all_runs_df(
 ) -> pd.DataFrame:
     """
     Escanea experiments_path y devuelve un DataFrame con todos los experimentos,
-    ordenado por rank_metric (mejor primero).
+    ordenado por rank_metric (mejor primero), aplicando el criterio de
+    desempate por std (ver _sort_df_by_rank).
 
     Columnas: metadatos del run + rank_value + métricas (media ± std) + best_epoch.
     """
@@ -316,11 +362,7 @@ def collect_all_runs_df(
     if not records:
         return pd.DataFrame()
 
-    return (
-        pd.DataFrame(records)
-        .sort_values("rank_value", ascending=ascending, na_position="last")
-        .reset_index(drop=True)
-    )
+    return _sort_df_by_rank(pd.DataFrame(records), rank_metric, ascending)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
