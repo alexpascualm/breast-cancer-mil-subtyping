@@ -12,6 +12,13 @@ Al agregar entre folds se obtiene la MEDIA de esas mejores épocas.
 Para el entrenamiento definitivo:
     epochs_final = round(best_epoch_mean) + 1
 
+Criterio de selección / ranking
+--------------------------------
+Se ordena por rank_metric redondeado a 2 decimales (centésimas). En caso de
+empate a centésimas, gana la configuración con menor std en rank_metric.
+Si también hay empate en el std, se usa el valor exacto de rank_metric como
+desempate final.
+
 Estructura del JSON generado por save_best_config_json
 -------------------------------------------------------
 {
@@ -193,6 +200,58 @@ def load_and_aggregate_run(run_dir: str, rank_metric: str) -> Optional[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CRITERIO DE ORDENACIÓN / DESEMPATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _record_sort_key(record: dict, rank_metric: str, ascending: bool) -> tuple:
+    """
+    Clave de ordenación para records internos (de select_best_config).
+
+    Orden:
+      1. rank_metric redondeado a 2 decimales (centésimas).
+      2. std de rank_metric (siempre: menor std es mejor, sea ascending o no).
+      3. valor exacto de rank_metric (desempate final).
+
+    La tupla resultante se ordena de forma ascendente (sorted normal), de modo
+    que el primer elemento sea siempre la mejor configuración.
+    """
+    val = record[rank_metric]
+    std = record["agg_metrics"].get(f"{rank_metric}_std", float("inf"))
+    if math.isnan(std):
+        std = float("inf")
+
+    rounded = round(val, 2)
+
+    if ascending:
+        # Menor valor es mejor → orden ascendente natural.
+        return (rounded, std, val)
+    else:
+        # Mayor valor es mejor → invertimos signo para que sorted() ascendente
+        # deje primero al de mayor valor. El std NO se invierte: menor std
+        # siempre gana el empate, independientemente de 'ascending'.
+        return (-rounded, std, -val)
+
+
+def _entry_sort_key(entry: dict, ascending: bool) -> tuple:
+    """
+    Clave de ordenación equivalente a _record_sort_key pero para entries
+    ya serializados (dicts con 'rank_value' y 'rank_value_std'), usados al
+    construir los rankings del JSON.
+    """
+    val = entry["rank_value"]
+    std = entry.get("rank_value_std", float("inf"))
+    if std is None or (isinstance(std, float) and math.isnan(std)):
+        std = float("inf")
+
+    rounded = round(val, 2)
+
+    if ascending:
+        return (rounded, std, val)
+    else:
+        return (-rounded, std, -val)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONSTRUCCIÓN DEL DATAFRAME MAESTRO (usado por el notebook)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -279,6 +338,11 @@ def select_best_config(
     """
     Escanea experiments_path y selecciona la mejor configuración por tarea.
 
+    Criterio de selección (para el global y para cada encoder x MIL):
+      1. rank_metric redondeado a 2 decimales.
+      2. En caso de empate a centésimas, menor std de rank_metric.
+      3. En caso de empate también en std, valor exacto de rank_metric.
+
     Returns
     -------
     best_per_task : dict  {task_name -> record}
@@ -346,7 +410,8 @@ def select_best_config(
             continue
 
         sorted_records = sorted(
-            task_records, key=lambda r: r[rank_metric], reverse=not ascending
+            task_records,
+            key=lambda r: _record_sort_key(r, rank_metric, ascending),
         )
         best = sorted_records[0]
 
@@ -357,7 +422,9 @@ def select_best_config(
             enc_mil_groups.setdefault(key, []).append(r)
 
         best["best_per_encoder_mil"] = {
-            key: sorted(group, key=lambda r: r[rank_metric], reverse=not ascending)[0]
+            key: sorted(
+                group, key=lambda r: _record_sort_key(r, rank_metric, ascending)
+            )[0]
             for key, group in enc_mil_groups.items()
         }
         best["all_records"] = sorted_records
@@ -379,8 +446,7 @@ def select_best_config(
             )
             enc_mil_sorted = sorted(
                 best["best_per_encoder_mil"].items(),
-                key=lambda kv: kv[1][rank_metric],
-                reverse=not ascending,
+                key=lambda kv: _record_sort_key(kv[1], rank_metric, ascending),
             )
             print("  ── Mejor por encoder x MIL ──")
             for key, rec in enc_mil_sorted:
@@ -452,6 +518,11 @@ def save_best_config_json(
     Guarda <task_results_path>/best_config.json con la selección de la mejor
     configuración para una tarea.
 
+    El ranking (ranking_encoder_mil y full_ranking) se ordena con el mismo
+    criterio que select_best_config: rank_metric redondeado a 2 decimales,
+    desempate por menor std de rank_metric, y como último desempate el valor
+    exacto de rank_metric.
+
     Estructura del JSON
     --------------------
     {
@@ -479,15 +550,17 @@ def save_best_config_json(
              "encoder_mil_key": key}
             for key, rec in enc_mil_map.items()
         ],
-        key=lambda e: e["rank_value"],
-        reverse=not ascending,  # ascending=False → mayor primero, ascending=True → menor primero
+        key=lambda e: _entry_sort_key(e, ascending),
     )
 
-    full_ranking = [
-        {**_record_to_entry(rec, rank_metric, metric_cols),
-         "encoder_mil_key": f"{rec['meta']['model']}_{rec['meta']['mil']}"}
-        for rec in all_records
-    ]
+    full_ranking = sorted(
+        [
+            {**_record_to_entry(rec, rank_metric, metric_cols),
+             "encoder_mil_key": f"{rec['meta']['model']}_{rec['meta']['mil']}"}
+            for rec in all_records
+        ],
+        key=lambda e: _entry_sort_key(e, ascending),
+    )
 
     if selected_enc_mil_key and selected_enc_mil_key in enc_mil_map:
         selected = {
