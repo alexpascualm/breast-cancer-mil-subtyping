@@ -45,6 +45,7 @@ from torch.utils.data import DataLoader
 # ──────────────────────────────────────────────────────────────────────────────
 # Imports del proyecto
 # ──────────────────────────────────────────────────────────────────────────────
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import (
     bcnb_images_folder_path,
     bcnb_labels_df_path,
