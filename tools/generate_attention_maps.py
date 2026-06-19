@@ -1,32 +1,44 @@
 """
 generate_attention_maps.py
 --------------------------
-Genera mapas de atención para WSIs usando modelos entrenados y guardados en test.py.
+Genera mapas de calor para WSIs usando modelos entrenados y guardados en test.py.
 Solo funciona con modelos que proporcionen pesos de atención por parche.
 
 Para cada WSI seleccionada y cada tarea produce tres imágenes:
   1. WSI reconstruida (rescalada a resolución visualizable)
-  2. Máscara de atención (parches coloreados por peso de atención)
-  3. Fusión de WSI + máscara de atención
+  2. Máscara de calor (parches coloreados por peso)
+  3. Fusión de WSI + máscara de calor
+
+Métodos de explicación soportados
+----------------------------------
+  attention  → Pesos de atención internos del modelo (comportamiento original).
+               Solo disponible para modelos abMIL-bag-level, abMIL-instance-level y transMIL.
+
+  single     → Método "Single" de Early et al. / xMIL (paper: "Beyond Attention Heatmaps").
+               Pasa cada parche de forma individual por el modelo y usa la probabilidad
+               softmax de la clase predicha como score de relevancia.
+               Compatible con cualquier arquitectura MIL que soporte forward_from_embeddings
+               o forward estándar.
 
 Estructura de salida
 --------------------
-  <output_path>/                     ← mismo nivel que test_results/
+  <output_path>/
     log.txt
     dev_set/
       <wsi_stem>/
-        <task>_success_pred0_true0/
+        <task>_<method>_success_pred0_true0/
           wsi.<fmt>
-          attention.<fmt>
+          heatmap.<fmt>
           overlay.<fmt>
-        <task>_failure_pred1_true0/
-          ...
-    test_set/
-      <wsi_stem>/
         ...
+    test_set/
+      ...
 
 Uso mínimo:
   python generate_attention_maps.py --test_results_path /workspace/results/my_run/test_results
+
+Ejemplo con método Single:
+  python generate_attention_maps.py --test_results_path /workspace/results/my_run/test_results --explanation_method single
 """
 
 import argparse
@@ -57,7 +69,6 @@ from data_load import (
     collate_fn,
 )
 from utils.train_utils import get_model, set_multiple_seed
-from utils.test_utils import select_best_config, build_final_args
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -102,12 +113,39 @@ class TeeLogger:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CONSTANTES
+# ──────────────────────────────────────────────────────────────────────────────
+
+# MIL compatibles con pesos de atención internos (método 'attention')
+SUPPORTED_MIL_ATTENTION = [
+    "abMIL-bag-level",
+    "abMIL-instance-level",
+    "transMIL",
+]
+
+# Todos los MIL soportados para el método 'single' (no requiere pesos internos)
+SUPPORTED_MIL_SINGLE = [
+    "abMIL-bag-level",
+    "abMIL-instance-level",
+    "transMIL",
+    # Añade aquí otras arquitecturas que tengas en tu proyecto
+]
+
+EXPLANATION_METHODS = ["attention", "single"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # ARGS
 # ──────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Genera mapas de atención para WSIs con modelos que proporcionen pesos de atención por parche."
+        description=(
+            "Genera mapas de calor para WSIs. Soporta dos métodos de explicación:\n"
+            "  attention  → pesos de atención internos del modelo (original).\n"
+            "  single     → método Single de xMIL: forward de un parche a la vez."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
 
     # Rutas obligatorias
@@ -151,7 +189,7 @@ def parse_args():
         "--tasks", type=str, nargs="+",
         default=["er", "pr", "her2", "ki67", "molecular_subtype"],
         choices=["er", "pr", "her2", "ki67", "molecular_subtype"],
-        help="Tareas para las que generar mapas de atención."
+        help="Tareas para las que generar mapas de calor."
     )
     parser.add_argument(
         "--n_images", type=int, default=10,
@@ -167,7 +205,21 @@ def parse_args():
     )
     parser.add_argument(
         "--overlay_alpha", type=float, default=0.45,
-        help="Opacidad de la máscara de atención en la imagen de fusión (0.0-1.0)."
+        help="Opacidad de la máscara de calor en la imagen de fusión (0.0-1.0)."
+    )
+
+    # ── Método de explicación ─────────────────────────────────────────────────
+    parser.add_argument(
+        "--explanation_method", type=str, default="attention",
+        choices=EXPLANATION_METHODS,
+        help=(
+            "Método para calcular los scores de relevancia por parche:\n"
+            "  attention  → pesos de atención internos del modelo (por defecto).\n"
+            "               Solo válido para abMIL-bag-level, abMIL-instance-level, transMIL.\n"
+            "  single     → método Single de xMIL (Early et al., 2022 / Jamshidi et al., 2026).\n"
+            "               Hace un forward independiente de cada parche y usa softmax(pred)[clase]\n"
+            "               como score de relevancia. Más lento pero más fiel al modelo."
+        )
     )
 
     # Varios
@@ -178,52 +230,35 @@ def parse_args():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CONSTANTES
+# COLORMAP
 # ──────────────────────────────────────────────────────────────────────────────
 
-# MIL compatible con mapas de atención (los demás se omiten)
-SUPPORTED_MIL = ["abMIL-bag-level",
-                "abMIL-instance-level",
-                "transMIL"]
-
-# Colormap para la máscara de atención (rojo = alta atención)
-# Se aplica manualmente para evitar dependencia de matplotlib
-def _attention_colormap(weight_normalized: float) -> tuple:
+def _heatmap_colormap(weight_normalized: float) -> tuple:
     """
     Convierte un peso normalizado [0,1] a color RGB usando un gradiente
-    azul → amarillo → rojo (simula 'jet' o 'hot' sin matplotlib).
+    azul → cian → verde → amarillo → rojo.
 
     Args:
         weight_normalized: float en [0, 1]
 
     Returns:
-        (R, G, B) tuple con valores enteros en [0, 255]
+        (R, G, B) con valores enteros en [0, 255]
     """
     w = float(np.clip(weight_normalized, 0.0, 1.0))
 
-    # Gradiente: azul frío (0) → cian → verde → amarillo → rojo caliente (1)
     if w < 0.25:
         t = w / 0.25
-        r = int(0)
-        g = int(t * 255)
-        b = int(255)
+        return (0, int(t * 255), 255)
     elif w < 0.5:
         t = (w - 0.25) / 0.25
-        r = int(0)
-        g = int(255)
-        b = int((1 - t) * 255)
+        return (0, 255, int((1 - t) * 255))
     elif w < 0.75:
         t = (w - 0.5) / 0.25
-        r = int(t * 255)
-        g = int(255)
-        b = int(0)
+        return (int(t * 255), 255, 0)
     else:
         t = (w - 0.75) / 0.25
-        r = int(255)
-        g = int((1 - t) * 255)
-        b = int(0)
+        return (255, int((1 - t) * 255), 0)
 
-    return (r, g, b)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CARGA DE SPLITS
@@ -335,10 +370,13 @@ def load_trained_model(
     num_classes: int,
     use_precomputed: bool,
     device: torch.device,
+    explanation_method: str,
 ) -> tuple:
     """
-    Reconstruye el modelo desde best_config.json y carga los pesos de
-    final_model/.
+    Reconstruye el modelo desde best_config.json y carga los pesos de final_model/.
+
+    Para el método 'attention', verifica que la arquitectura MIL sea compatible.
+    Para el método 'single', acepta cualquier arquitectura listada en SUPPORTED_MIL_SINGLE.
 
     Returns
     -------
@@ -350,34 +388,42 @@ def load_trained_model(
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
             f"best_config.json no encontrado en: {task_results_path}\n"
-            "Ejecuta test.py antes de generar los mapas de atención."
+            "Ejecuta test.py antes de generar los mapas de calor."
         )
 
     with open(config_path, "r") as f:
         cfg = json.load(f)
 
-    selected = cfg["selected"]
+    selected    = cfg["selected"]
     hyperparams = selected["hyperparams"]
-    enc_name = hyperparams["model"]
-    mil_mode = hyperparams["mil"]
+    enc_name    = hyperparams["model"]
+    mil_mode    = hyperparams["mil"]
 
-    # Se descartan modelos sin pesos de atención (no compatibles con mapas de atención)
-    if mil_mode not in SUPPORTED_MIL:
-        raise ValueError(
-            f"[{task}] Estrategia MIL '{mil_mode}' no soportada para mapas de atención. "
-            f"Solo se genera mapa para '{SUPPORTED_MIL}'."
-        )
+    # Validar compatibilidad con el método de explicación elegido
+    if explanation_method == "attention":
+        if mil_mode not in SUPPORTED_MIL_ATTENTION:
+            raise ValueError(
+                f"[{task}] Arquitectura MIL '{mil_mode}' no soportada para el método 'attention'. "
+                f"Arquitecturas compatibles: {SUPPORTED_MIL_ATTENTION}. "
+                f"Prueba con --explanation_method single."
+            )
+    elif explanation_method == "single":
+        if mil_mode not in SUPPORTED_MIL_SINGLE:
+            raise ValueError(
+                f"[{task}] Arquitectura MIL '{mil_mode}' no listada en SUPPORTED_MIL_SINGLE. "
+                f"Añádela si es compatible con forward estándar."
+            )
 
     model = get_model(
-        patch_encoder_type=enc_name,
-        mil_aggregation_mode=mil_mode,
-        unfreeze_backbone=False,
-        num_classes=num_classes,
-        skip_encoder=use_precomputed,
+        patch_encoder_type    = enc_name,
+        mil_aggregation_mode  = mil_mode,
+        unfreeze_backbone     = False,
+        num_classes           = num_classes,
+        skip_encoder          = use_precomputed,
     ).to(device)
 
     model_path = os.path.join(task_results_path, "final_model")
-    ckpt = os.path.join(model_path, "model.pt")
+    ckpt       = os.path.join(model_path, "model.pt")
 
     if os.path.isfile(ckpt):
         state_dict = torch.load(ckpt, map_location=device)
@@ -398,31 +444,28 @@ def load_trained_model(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# INFERENCIA PARA HEATMAP — UNA WSI
+# SCORES DE RELEVANCIA: MÉTODO ATTENTION
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_inference_single_wsi(
+def _compute_attention_weights(
     model,
     features: torch.Tensor,
     device: torch.device,
     use_precomputed: bool,
 ) -> tuple:
     """
-    Forward sobre una sola WSI.
+    Calcula los scores de relevancia usando los pesos de atención internos del modelo.
 
-    Args
-    ----
-    features       : tensor (N_patches, D) o (N_patches, C, H, W) ya en CPU
-    device         : dispositivo
-    use_precomputed: si True, usa forward_from_embeddings
+    El modelo devuelve (wsi_logits, _, weights_list) donde weights_list[0] es un
+    tensor (N_patches,) con los pesos de atención normalizados por softmax.
 
     Returns
     -------
     pred_label : int
     probs      : ndarray (num_classes,)
-    weights    : ndarray (N_patches,)
+    weights    : ndarray (N_patches,)  ← pesos de atención del modelo
     """
-    feats = features.to(device)  # (N, D) o (N, C, H, W)
+    feats = features.to(device)
 
     with torch.no_grad():
         if use_precomputed:
@@ -438,14 +481,115 @@ def run_inference_single_wsi(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SCORES DE RELEVANCIA: MÉTODO SINGLE (xMIL)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _compute_single_weights(
+    model,
+    features: torch.Tensor,
+    device: torch.device,
+    use_precomputed: bool,
+) -> tuple:
+    """
+    Calcula los scores de relevancia usando el método Single de xMIL.
+
+    Implementación directa de Early et al. (2022) / Jamshidi et al. (2026):
+      - Para cada parche k, se construye una bag de tamaño 1 con solo ese parche.
+      - Se hace forward y se aplica softmax.
+      - El score del parche k es softmax(logits)[clase_predicha_globalmente].
+
+    La clase a explicar se determina haciendo primero un forward con la bag completa,
+    de forma equivalente a la implementación de xAttentionMIL.explain_perturbation
+    con perturbation_method='keep'.
+
+    Complejidad: O(N_patches) forwards individuales. Puede ser lento para WSIs
+    con muchos parches; se recomienda usar con embeddings precomputados.
+
+    Returns
+    -------
+    pred_label : int     ← clase predicha con la bag completa
+    probs      : ndarray (num_classes,)  ← probabilidades de la bag completa
+    weights    : ndarray (N_patches,)    ← scores Single por parche
+    """
+    feats = features.to(device)   # (N, D)
+    N     = feats.shape[0]
+
+    # ── 1. Forward con la bag completa para determinar la clase a explicar ──────
+    with torch.no_grad():
+        if use_precomputed:
+            wsi_logits_full, _, _ = model.forward_from_embeddings([feats])
+        else:
+            wsi_logits_full, _, _ = model([feats])
+
+    probs_full = torch.softmax(wsi_logits_full[0], dim=0).cpu()
+    pred_label = int(torch.argmax(probs_full).item())
+    probs      = probs_full.numpy()
+
+    # ── 2. Forward individual para cada parche (bag de tamaño 1) ──────────────
+    scores = []
+    for k in range(N):
+        single_patch = feats[k : k + 1]   # (1, D) — bag con un solo parche
+
+        with torch.no_grad():
+            if use_precomputed:
+                logit_k, _, _ = model.forward_from_embeddings([single_patch])
+            else:
+                logit_k, _, _ = model([single_patch])
+
+        prob_k = torch.softmax(logit_k[0], dim=0).cpu()
+        # Score = probabilidad softmax de la clase predicha globalmente
+        scores.append(prob_k[pred_label].item())
+
+    weights = np.array(scores, dtype=np.float32)   # (N,)
+
+    return pred_label, probs, weights
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DISPATCHER DE MÉTODOS DE EXPLICACIÓN
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_inference_single_wsi(
+    model,
+    features: torch.Tensor,
+    device: torch.device,
+    use_precomputed: bool,
+    explanation_method: str,
+) -> tuple:
+    """
+    Calcula los scores de relevancia por parche según el método seleccionado.
+
+    Args
+    ----
+    model               : modelo en modo eval
+    features            : tensor (N_patches, D)
+    device              : dispositivo
+    use_precomputed     : si True usa forward_from_embeddings
+    explanation_method  : "attention" | "single"
+
+    Returns
+    -------
+    pred_label : int
+    probs      : ndarray (num_classes,)
+    weights    : ndarray (N_patches,)
+    """
+    if explanation_method == "attention":
+        return _compute_attention_weights(model, features, device, use_precomputed)
+    elif explanation_method == "single":
+        return _compute_single_weights(model, features, device, use_precomputed)
+    else:
+        raise ValueError(
+            f"explanation_method desconocido: '{explanation_method}'. "
+            f"Opciones válidas: {EXPLANATION_METHODS}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # RECONSTRUCCIÓN VISUAL DE LA WSI
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _read_patch_images_from_h5(h5_path: str) -> list:
-    """
-    Lee las imágenes crudas de un H5 de parches como lista de PIL.Image.
-    Las coords no se leen aquí: vienen del dataset (mismo origen que entrenamiento).
-    """
+    """Lee las imágenes crudas de un H5 de parches como lista de PIL.Image."""
     with h5py.File(h5_path, "r") as h5:
         imgs_raw = h5["imgs"][:]    # (N, H, W, 3) uint8
     return [Image.fromarray(img) for img in imgs_raw]
@@ -469,8 +613,8 @@ def reconstruct_wsi(
     if not pil_imgs:
         raise ValueError("No hay parches para reconstruir la WSI.")
 
-    patch_size  = max(pil_imgs[0].size)
-    coords_arr  = np.asarray(coords)
+    patch_size   = max(pil_imgs[0].size)
+    coords_arr   = np.asarray(coords)
     x_min, y_min = coords_arr[:, 0].min(), coords_arr[:, 1].min()
     x_max, y_max = coords_arr[:, 0].max(), coords_arr[:, 1].max()
 
@@ -492,7 +636,7 @@ def reconstruct_wsi(
     return canvas, scale, (x_min, y_min), patch_size_out
 
 
-def build_attention_mask(
+def build_heatmap_mask(
     coords: np.ndarray,
     weights: np.ndarray,
     canvas_size: tuple,
@@ -500,7 +644,7 @@ def build_attention_mask(
     scale: float,
     origin: tuple,
 ) -> Image.Image:
-    """Máscara RGBA: cada parche coloreado por su peso de atención."""
+    """Máscara RGBA: cada parche coloreado por su score de relevancia."""
     out_w, out_h = canvas_size
     x_min, y_min = origin
 
@@ -514,17 +658,20 @@ def build_attention_mask(
     for (x, y), w_norm in zip(coords, weights_norm):
         px    = min(int((x - x_min) * scale), out_w - patch_size_out)
         py    = min(int((y - y_min) * scale), out_h - patch_size_out)
-        r, g, b = _attention_colormap(w_norm)
+        r, g, b = _heatmap_colormap(w_norm)
         alpha   = int(60 + w_norm * 195)
-        mask.paste(Image.new("RGBA", (patch_size_out, patch_size_out), (r, g, b, alpha)), (px, py))
+        mask.paste(
+            Image.new("RGBA", (patch_size_out, patch_size_out), (r, g, b, alpha)),
+            (px, py),
+        )
 
     return mask
 
 
 def build_overlay(wsi_img: Image.Image, mask: Image.Image, alpha: float) -> Image.Image:
-    """Fusiona WSI + máscara de atención."""
-    r, g, b, a    = mask.split()
-    mask_adj      = Image.merge("RGBA", (r, g, b, a.point(lambda v: int(v * alpha))))
+    """Fusiona WSI + máscara de calor."""
+    r, g, b, a = mask.split()
+    mask_adj   = Image.merge("RGBA", (r, g, b, a.point(lambda v: int(v * alpha))))
     return Image.alpha_composite(wsi_img.convert("RGBA"), mask_adj).convert("RGB")
 
 
@@ -552,20 +699,18 @@ def process_task_on_split(
     max_output_pixels: int,
     output_format: str,
     overlay_alpha: float,
+    explanation_method: str,
 ):
     """
     Procesa las N WSIs fijas del split con el modelo de `task`.
 
-    Usa Patches_WSI_Dataset o Embeddings_WSI_Dataset para construir los
-    tensores de entrada (mismas transforms que en entrenamiento). Las PIL
-    images para la reconstrucción visual se leen directamente del H5 original.
-
     Estructura de salida por WSI:
-        <output_split_path>/<wsi_stem>/<task>_<success|failure>_pred<P>_true<T>/
-            wsi.<fmt>  attention.<fmt>  overlay.<fmt>
+        <output_split_path>/<wsi_stem>/<task>_<method>_<outcome>_pred<P>_true<T>/
+            wsi.<fmt>   heatmap.<fmt>   overlay.<fmt>
     """
     fmt = output_format.lower()
-    print(f"\n  [{split_name}] Tarea '{task}' — construyendo dataset...")
+    print(f"\n  [{split_name}] Tarea '{task}' — método '{explanation_method}' — "
+          f"construyendo dataset...")
 
     # ── Construir dataset ─────────────────────────────────────────────────────
     try:
@@ -590,15 +735,11 @@ def process_task_on_split(
     )
 
     for batch_idx, (features_list, labels_batch, wsi_ids, coords_list) in enumerate(loader):
-        # batch_size=1 → desempaquetar directamente
-        features   = features_list[0]    # tensor (N_patches, D) o (N_patches, C, H, W)
+        features   = features_list[0]
         true_label = labels_batch[0].item()
-        wsi_id     = wsi_ids[0]           # str: ruta al .h5 (patches o embeddings)
-        coords     = coords_list[0]       # ndarray (N_patches, 2) o None
+        wsi_id     = wsi_ids[0]
+        coords     = coords_list[0]
 
-        # wsi_stem e h5_path del fichero de parches original
-        # En Patches_WSI_Dataset: wsi_id = features path → directo
-        # En Embeddings_WSI_Dataset: wsi_id = emb_path → reconstruir desde df_valid
         if use_precomputed:
             h5_path = df_valid.iloc[batch_idx]["features"]
         else:
@@ -608,15 +749,22 @@ def process_task_on_split(
 
         print(f"\n    WSI {batch_idx+1}/{n} — {wsi_stem}  (true_{task}={true_label})")
 
-        # ── Saltar si etiqueta inválida para esta tarea ───────────────────────
+        # ── Saltar etiqueta inválida ──────────────────────────────────────────
         if true_label == -1:
             print(f"      [SKIP] Etiqueta -1 para tarea '{task}'.")
             continue
 
-        # ── Inferencia ────────────────────────────────────────────────────────
+        # ── Calcular scores de relevancia según el método elegido ─────────────
+        if explanation_method == "single":
+            print(f"      [Single] Ejecutando {features.shape[0]} forwards individuales...")
+
         try:
             pred_label, probs, weights = run_inference_single_wsi(
-                model, features, device, use_precomputed
+                model              = model,
+                features           = features,
+                device             = device,
+                use_precomputed    = use_precomputed,
+                explanation_method = explanation_method,
             )
         except Exception as e:
             print(f"      [ERROR] Inferencia fallida: {e}")
@@ -625,11 +773,10 @@ def process_task_on_split(
         outcome = "success" if pred_label == true_label else "failure"
         print(f"      pred={pred_label}  true={true_label}  outcome={outcome}")
         print(f"      probs={[f'{p:.3f}' for p in probs]}")
-        print(f"      pesos — min={weights.min():.4f}  max={weights.max():.4f}  "
-              f"mean={weights.mean():.4f}")
+        print(f"      scores ({explanation_method}) — "
+              f"min={weights.min():.4f}  max={weights.max():.4f}  mean={weights.mean():.4f}")
 
         # ── Coordenadas ───────────────────────────────────────────────────────
-        # Vienen del dataset (mismo origen que entrenamiento). Fallback al H5.
         if coords is None:
             print(f"      [WARN] coords=None desde el dataset, releyendo del H5...")
             try:
@@ -670,35 +817,37 @@ def process_task_on_split(
 
         print(f"      Canvas={wsi_img.size}  escala={scale:.4f}  parche_px={patch_size_out}")
 
-        # ── Máscara de atención ───────────────────────────────────────────────
+        # ── Máscara de calor ──────────────────────────────────────────────────
         try:
-            attn_mask = build_attention_mask(
+            heatmap_mask = build_heatmap_mask(
                 coords_arr, weights, wsi_img.size, patch_size_out, scale, origin
             )
         except Exception as e:
-            print(f"      [ERROR] Máscara de atención fallida: {e}")
+            print(f"      [ERROR] Máscara de calor fallida: {e}")
             continue
 
         # ── Overlay ───────────────────────────────────────────────────────────
         try:
-            overlay = build_overlay(wsi_img, attn_mask, overlay_alpha)
+            overlay = build_overlay(wsi_img, heatmap_mask, overlay_alpha)
         except Exception as e:
             print(f"      [ERROR] Overlay fallido: {e}")
             continue
 
         # ── Guardar ───────────────────────────────────────────────────────────
-        folder_tag = f"{task}_{outcome}_pred{pred_label}_true{true_label}"
+        # El nombre de carpeta incluye el método para que no haya colisiones
+        # al ejecutar ambos métodos sobre el mismo experimento.
+        folder_tag = f"{task}_{explanation_method}_{outcome}_pred{pred_label}_true{true_label}"
         out_dir    = os.path.join(output_split_path, wsi_stem, folder_tag)
         os.makedirs(out_dir, exist_ok=True)
 
-        save_image(wsi_img,              os.path.join(out_dir, f"wsi.{fmt}"),       fmt)
-        save_image(attn_mask.convert("RGB"), os.path.join(out_dir, f"attention.{fmt}"), fmt)
-        save_image(overlay,              os.path.join(out_dir, f"overlay.{fmt}"),   fmt)
+        save_image(wsi_img,                           os.path.join(out_dir, f"wsi.{fmt}"),     fmt)
+        save_image(heatmap_mask.convert("RGB"),       os.path.join(out_dir, f"heatmap.{fmt}"), fmt)
+        save_image(overlay,                           os.path.join(out_dir, f"overlay.{fmt}"), fmt)
 
         print(f"      Guardado: {out_dir}")
 
         # ── Liberar memoria ───────────────────────────────────────────────────
-        del pil_imgs, wsi_img, attn_mask, overlay
+        del pil_imgs, wsi_img, heatmap_mask, overlay
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -712,13 +861,11 @@ def main():
     args = parse_args()
     set_multiple_seed(args.seed)
 
-    # Rutas de salida (attention_maps/ al mismo nivel que test_results/)
     parent = os.path.dirname(os.path.abspath(args.test_results_path))
     if args.output_path is None:
         args.output_path = os.path.join(parent, "attention_maps")
     os.makedirs(args.output_path, exist_ok=True)
 
-    # Iniciar logger
     logger = TeeLogger(os.path.join(args.output_path, "log.txt"))
     logger.start()
 
@@ -730,14 +877,14 @@ def main():
 
 def _run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Dispositivo:   {device}")
-    print(f"Salida:        {args.output_path}")
-    print(f"test_results:  {args.test_results_path}")
+    print(f"Dispositivo:          {device}")
+    print(f"Salida:               {args.output_path}")
+    print(f"test_results:         {args.test_results_path}")
+    print(f"Método explicación:   {args.explanation_method}")
 
     # ── Splits ────────────────────────────────────────────────────────────────
     dev_df, test_df = load_splits(args)
 
-    # ── Selección fija de N WSIs por split (mismas para todas las tareas) ─────
     print(f"\nSeleccionando {args.n_images} WSIs fijas por split...")
     print("  dev_set:")
     dev_selected  = select_wsis(dev_df,  args.n_images)
@@ -754,7 +901,7 @@ def _run(args):
         task_results_path = os.path.join(args.test_results_path, task)
 
         print(f"\n{'='*65}")
-        print(f"  TAREA: {task}")
+        print(f"  TAREA: {task}  |  Método: {args.explanation_method}")
         print(f"{'='*65}")
 
         config_path = os.path.join(task_results_path, "best_config.json")
@@ -769,9 +916,22 @@ def _run(args):
         enc_name    = hyperparams["model"]
         mil_mode    = hyperparams["mil"]
 
-        if mil_mode not in SUPPORTED_MIL:
-            print(f"  [SKIP] MIL '{mil_mode}' no soportado (requiere '{SUPPORTED_MIL}').")
-            continue
+        # Validar compatibilidad antes de cargar pesos
+        if args.explanation_method == "attention":
+            if mil_mode not in SUPPORTED_MIL_ATTENTION:
+                print(
+                    f"  [SKIP] Método 'attention' no soportado para MIL '{mil_mode}'. "
+                    f"Compatible con: {SUPPORTED_MIL_ATTENTION}. "
+                    f"Usa --explanation_method single."
+                )
+                continue
+        elif args.explanation_method == "single":
+            if mil_mode not in SUPPORTED_MIL_SINGLE:
+                print(
+                    f"  [SKIP] Método 'single' no listado para MIL '{mil_mode}'. "
+                    f"Añádela a SUPPORTED_MIL_SINGLE si el modelo tiene forward estándar."
+                )
+                continue
 
         print(f"  Encoder: {enc_name}  |  MIL: {mil_mode}")
 
@@ -790,12 +950,25 @@ def _run(args):
                     "Se usarán parches directamente."
                 )
 
+        # Aviso de rendimiento para Single sin embeddings precomputados
+        if args.explanation_method == "single" and not use_precomputed:
+            print(
+                "  [WARN] Método 'single' sin embeddings precomputados puede ser muy lento: "
+                "cada parche requiere extraer features + forward del modelo. "
+                "Se recomienda usar --embeddings_folder."
+            )
+
         num_classes = 4 if task == "molecular_subtype" else 2
 
         # ── Cargar modelo ─────────────────────────────────────────────────────
         try:
             model, _, _ = load_trained_model(
-                task_results_path, task, num_classes, use_precomputed, device
+                task_results_path  = task_results_path,
+                task               = task,
+                num_classes        = num_classes,
+                use_precomputed    = use_precomputed,
+                device             = device,
+                explanation_method = args.explanation_method,
             )
         except (ValueError, FileNotFoundError) as e:
             print(f"  [SKIP] {e}")
@@ -804,20 +977,21 @@ def _run(args):
             print(f"  [ERROR] Carga del modelo fallida: {e}")
             continue
 
-        # ── Procesar dev y test con las WSIs fijas ────────────────────────────
+        # ── Procesar dev y test ───────────────────────────────────────────────
         for split_name, df_selected in splits.items():
             process_task_on_split(
-                split_name        = split_name,
-                df_selected       = df_selected,
-                task              = task,
-                model             = model,
-                use_precomputed   = use_precomputed,
-                emb_folder_enc    = emb_folder_enc,
-                device            = device,
-                output_split_path = os.path.join(args.output_path, split_name),
-                max_output_pixels = args.max_output_pixels,
-                output_format     = args.output_format,
-                overlay_alpha     = args.overlay_alpha,
+                split_name         = split_name,
+                df_selected        = df_selected,
+                task               = task,
+                model              = model,
+                use_precomputed    = use_precomputed,
+                emb_folder_enc     = emb_folder_enc,
+                device             = device,
+                output_split_path  = os.path.join(args.output_path, split_name),
+                max_output_pixels  = args.max_output_pixels,
+                output_format      = args.output_format,
+                overlay_alpha      = args.overlay_alpha,
+                explanation_method = args.explanation_method,
             )
 
         # ── Liberar modelo ────────────────────────────────────────────────────
