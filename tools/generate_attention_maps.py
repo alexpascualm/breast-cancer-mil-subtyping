@@ -1,8 +1,7 @@
 """
-generate_attention_maps.py
+generate_heatmaps.py
 --------------------------
-Genera mapas de calor para WSIs usando modelos entrenados y guardados en test.py.
-Solo funciona con modelos que proporcionen pesos de atención por parche.
+Genera mapas de calor para WSIs usando modelos entrenados y guardados con el script test.py.
 
 Para cada WSI seleccionada y cada tarea produce tres imágenes:
   1. WSI reconstruida (rescalada a resolución visualizable)
@@ -11,19 +10,29 @@ Para cada WSI seleccionada y cada tarea produce tres imágenes:
 
 Métodos de explicación soportados
 ----------------------------------
-  attention  → Pesos de atención internos del modelo (comportamiento original).
+  attention  → Pesos de atención internos del modelo.
                Solo disponible para modelos abMIL-bag-level, abMIL-instance-level y transMIL.
 
-  single     → Método "Single" de Early et al. / xMIL (paper: "Beyond Attention Heatmaps").
-               Pasa cada parche de forma individual por el modelo y usa la probabilidad
+  single     → Pasa cada parche de forma individual por el modelo y usa la probabilidad
                softmax de la clase predicha como score de relevancia.
                Compatible con cualquier arquitectura MIL que soporte forward_from_embeddings
                o forward estándar.
+
+Nuevas funcionalidades
+-----------------------
+  --use_dev_set         → Activa o desactiva el procesado del dev_set (por defecto True).
+  --compute_srg         → Calcula el SRG (Symmetric Relevance Gain) por WSI.
+                          Si está activo, al final se guarda un CSV con todos los SRGs
+                          y se realiza un análisis estadístico entre métodos de explicación.
+  --explanation_method  → Ahora acepta una lista de métodos: ej. attention single.
+                          Se ejecutarán en batería todos los métodos indicados.
 
 Estructura de salida
 --------------------
   <output_path>/
     log.txt
+    srg_results.csv            ← (si --compute_srg) Una fila por (wsi, task, split, method)
+    srg_statistical_analysis.txt  ← (si --compute_srg y >1 método) Análisis estadístico
     dev_set/
       <wsi_stem>/
         <task>_<method>_success_pred0_true0/
@@ -37,8 +46,12 @@ Estructura de salida
 Uso mínimo:
   python generate_attention_maps.py --test_results_path /workspace/results/my_run/test_results
 
-Ejemplo con método Single:
-  python generate_attention_maps.py --test_results_path /workspace/results/my_run/test_results --explanation_method single
+Ejemplo en batería con SRG:
+  python generate_attention_maps.py \\
+      --test_results_path /workspace/results/my_run/test_results \\
+      --explanation_method attention single \\
+      --compute_srg \\
+      --use_dev_set
 """
 
 import argparse
@@ -52,6 +65,7 @@ import numpy as np
 import torch
 import pandas as pd
 from PIL import Image
+from scipy import stats
 from torch.utils.data import DataLoader
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -69,6 +83,7 @@ from data_load import (
     collate_fn,
 )
 from utils.train_utils import get_model, set_multiple_seed
+from utils.explainability.compute_srg import compute_srg
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -123,7 +138,7 @@ SUPPORTED_MIL_ATTENTION = [
     "transMIL",
 ]
 
-# Todos los MIL soportados para el método 'single' (no requiere pesos internos)
+# MIL compatibles con el método 'single' (cualquiera que soporte forward_from_embeddings o forward estándar)
 SUPPORTED_MIL_SINGLE = [
     "abMIL-bag-level",
     "abMIL-instance-level",
@@ -137,13 +152,14 @@ EXPLANATION_METHODS = ["attention", "single"]
 # ──────────────────────────────────────────────────────────────────────────────
 # ARGS
 # ──────────────────────────────────────────────────────────────────────────────
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Genera mapas de calor para WSIs. Soporta dos métodos de explicación:\n"
-            "  attention  → pesos de atención internos del modelo (original).\n"
-            "  single     → método Single de xMIL: forward de un parche a la vez."
+            "  attention  → pesos de atención internos del modelo.\n"
+            "  single     → pesos obtenidos al pasar cada parche por el modelo individualmente.\n\n"
+            "Ambos métodos pueden lanzarse en batería con --explanation_method attention single.\n"
+            "El flag --compute_srg activa el cálculo del SRG y el análisis estadístico. "
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -193,7 +209,14 @@ def parse_args():
     )
     parser.add_argument(
         "--n_images", type=int, default=10,
-        help="Número de WSIs a procesar por split. Las mismas N WSIs se usan en todas las tareas."
+        help="Número de WSIs a procesar por split para generar imágenes."
+    )
+    parser.add_argument(
+        "--n_srg", type=int, default=None,
+        help=(
+            "Número de WSIs a usar para calcular el SRG (si --compute_srg). "
+            "Si es None se usan todas las WSIs del split."
+        )
     )
     parser.add_argument(
         "--max_output_pixels", type=int, default=4_000_000,
@@ -208,18 +231,43 @@ def parse_args():
         help="Opacidad de la máscara de calor en la imagen de fusión (0.0-1.0)."
     )
 
-    # ── Método de explicación ─────────────────────────────────────────────────
+    # ── Método(s) de explicación ──────────────────────────────────────────────
     parser.add_argument(
-        "--explanation_method", type=str, default="attention",
+        "--explanation_method", type=str, nargs="+",
+        default=EXPLANATION_METHODS,
         choices=EXPLANATION_METHODS,
         help=(
-            "Método para calcular los scores de relevancia por parche:\n"
-            "  attention  → pesos de atención internos del modelo (por defecto).\n"
-            "               Solo válido para abMIL-bag-level, abMIL-instance-level, transMIL.\n"
-            "  single     → método Single de xMIL (Early et al., 2022 / Jamshidi et al., 2026).\n"
-            "               Hace un forward independiente de cada parche y usa softmax(pred)[clase]\n"
-            "               como score de relevancia. Más lento pero más fiel al modelo."
+            "Método(s) para calcular los scores de relevancia por parche.\n"
+            "Puede especificarse uno o varios (en batería):\n"
+            "  attention  → pesos de atención internos del modelo.\n"
+            "               Solo válido para modelos con pesos de atención como output.\n"
+            "  single     → Forward independiente de cada parche; usa softmax(pred)[clase]\n"
+            "               como score. Compatible con cualquier arquitectura MIL.\n"
+            "Ejemplo: --explanation_method attention single"
         )
+    )
+
+    # ── Nuevo: activar/desactivar dev_set ─────────────────────────────────────
+    parser.add_argument(
+        "--use_dev_set",  action="store_true",
+        help=(
+            "Si True, procesa también el dev_set además del test_set.\n"
+            "Si False (por defecto)  bbsolo se procesa el test_set."
+        )
+    )
+
+    # ── Nuevo: calcular SRG ───────────────────────────────────────────────────
+    parser.add_argument(
+        "--compute_srg", action="store_true", default=False,
+        help=(
+            "Si se activa, calcula el SRG (Symmetric Relevance Gain) de cada WSI.\n"
+            "Los resultados se guardan en srg_results.csv.\n"
+            "Si hay más de un método, se realiza análisis estadístico entre grupos."
+        )
+    )
+    parser.add_argument(
+        "--srg_n_bins", type=int, default=100,
+        help="Número de bins para el cálculo del SRG (por defecto 100, igual que el paper)."
     )
 
     # Varios
@@ -259,7 +307,6 @@ def _heatmap_colormap(weight_normalized: float) -> tuple:
         t = (w - 0.75) / 0.25
         return (255, int((1 - t) * 255), 0)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # CARGA DE SPLITS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -272,32 +319,52 @@ def load_splits(args) -> tuple:
     dev_path  = args.dev_df_path  or os.path.join(parent, "dev_df.csv")
     test_path = args.test_df_path or os.path.join(parent, "test_df.csv")
 
-    if not os.path.isfile(dev_path):
-        raise FileNotFoundError(
-            f"dev_df.csv no encontrado en: {dev_path}\n"
-            "Usa --dev_df_path para indicar la ruta correcta."
-        )
+    dev_df = None
+    if args.use_dev_set:
+        if not os.path.isfile(dev_path):
+            raise FileNotFoundError(
+                f"dev_df.csv no encontrado en: {dev_path}\n"
+                "Usa --dev_df_path para indicar la ruta correcta, "
+                "o desactiva el dev_set con --use_dev_set False."
+            )
+        dev_df = pd.read_csv(dev_path)
+        print(f"Splits cargados — dev: {len(dev_df)} WSIs")
+
     if not os.path.isfile(test_path):
         raise FileNotFoundError(
             f"test_df.csv no encontrado en: {test_path}\n"
             "Usa --test_df_path para indicar la ruta correcta."
         )
-
-    dev_df  = pd.read_csv(dev_path)
     test_df = pd.read_csv(test_path)
-    print(f"Splits cargados — dev: {len(dev_df)} WSIs  |  test: {len(test_df)} WSIs")
+    print(f"Splits cargados — test: {len(test_df)} WSIs")
+
     return dev_df, test_df
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SELECCIÓN FIJA DE WSIs POR SPLIT
+# SELECCIÓN DE WSIs POR SPLIT
 # ──────────────────────────────────────────────────────────────────────────────
 
 def select_wsis(df_split: pd.DataFrame, n_images: int) -> pd.DataFrame:
     """Primeras n_images filas del split. Fijas para todas las tareas."""
     n        = min(n_images, len(df_split))
     selected = df_split.head(n).reset_index(drop=True)
-    print(f"  → {n} WSIs seleccionadas (de {len(df_split)} disponibles)")
+    print(f"  → {n} WSIs seleccionadas para imágenes (de {len(df_split)} disponibles)")
+    return selected
+
+
+def select_wsis_srg(df_split: pd.DataFrame, n_srg: int | None) -> pd.DataFrame:
+    """
+    Selecciona las WSIs a usar para calcular el SRG.
+    Si n_srg es None, usa todas las del split.
+    """
+    if n_srg is None:
+        selected = df_split.reset_index(drop=True)
+        print(f"  → {len(selected)} WSIs seleccionadas para SRG (todas las disponibles)")
+    else:
+        n        = min(n_srg, len(df_split))
+        selected = df_split.head(n).reset_index(drop=True)
+        print(f"  → {n} WSIs seleccionadas para SRG (de {len(df_split)} disponibles)")
     return selected
 
 
@@ -481,7 +548,7 @@ def _compute_attention_weights(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SCORES DE RELEVANCIA: MÉTODO SINGLE (xMIL)
+# SCORES DE RELEVANCIA: MÉTODO SINGLE
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _compute_single_weights(
@@ -491,16 +558,11 @@ def _compute_single_weights(
     use_precomputed: bool,
 ) -> tuple:
     """
-    Calcula los scores de relevancia usando el método Single de xMIL.
+    Calcula los scores de relevancia usando el método Single.
 
-    Implementación directa de Early et al. (2022) / Jamshidi et al. (2026):
-      - Para cada parche k, se construye una bag de tamaño 1 con solo ese parche.
-      - Se hace forward y se aplica softmax.
-      - El score del parche k es softmax(logits)[clase_predicha_globalmente].
-
-    La clase a explicar se determina haciendo primero un forward con la bag completa,
-    de forma equivalente a la implementación de xAttentionMIL.explain_perturbation
-    con perturbation_method='keep'.
+    Implementación del método Single para clasificación:
+        cada parche se evalúa como una bolsa de tamaño 1 y
+        se usa la probabilidad de la clase predicha por la bolsa completa.
 
     Complejidad: O(N_patches) forwards individuales. Puede ser lento para WSIs
     con muchos parches; se recomienda usar con embeddings precomputados.
@@ -684,12 +746,197 @@ def save_image(img: Image.Image, path: str, fmt: str):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SRG: CÁLCULO Y RECOPILACIÓN
+# ──────────────────────────────────────────────────────────────────────────────
+
+def compute_and_collect_srg(
+    model,
+    features: torch.Tensor,
+    weights: np.ndarray,
+    pred_label: int,
+    device: torch.device,
+    n_bins: int,
+) -> float:
+    """
+    Llama a compute_srg con los embeddings y los pesos calculados por el método
+    de explicación, y devuelve el valor SRG para esta WSI.
+
+    Args
+    ----
+    model       : modelo en modo eval con forward_from_embeddings
+    features    : tensor (N_patches, D) — embeddings de la WSI
+    weights     : ndarray (N_patches,) — scores por parche del método de explicación
+    pred_label  : clase predicha globalmente (usada como target_class para SRG)
+    device      : dispositivo
+    n_bins      : número de bins para el SRG (default 100)
+
+    Returns
+    -------
+    float : SRG de esta WSI
+    """
+    srg_value = compute_srg(
+        model        = model,
+        embeddings   = features,
+        patch_scores = weights,
+        target_class = pred_label,
+        n_bins       = n_bins,
+        device       = device,
+    )
+    return srg_value
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SRG: ANÁLISIS ESTADÍSTICO ENTRE MÉTODOS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def statistical_analysis_srg(
+    srg_df: pd.DataFrame,
+    output_path: str,
+):
+    """
+    Realiza un análisis estadístico de los SRG entre métodos de explicación.
+
+    Comparaciones:
+      - Estadísticos descriptivos por (task, split, method).
+      - Si hay exactamente 2 métodos: Wilcoxon signed-rank test por (task, split)
+        para comparar los SRG emparejados (misma WSI, misma tarea).
+      - Si hay >2 métodos: Kruskal-Wallis test por (task, split) y post-hoc
+        Mann-Whitney con corrección de Bonferroni.
+
+    Guarda el resultado en <output_path>/srg_statistical_analysis.txt.
+    """
+    methods = sorted(srg_df["method"].unique())
+    n_methods = len(methods)
+
+    if n_methods < 2:
+        print("  [INFO] Solo un método de explicación — análisis estadístico omitido.")
+        return
+
+    report_lines = []
+    report_lines.append("=" * 70)
+    report_lines.append("  ANÁLISIS ESTADÍSTICO DEL SRG ENTRE MÉTODOS DE EXPLICACIÓN")
+    report_lines.append("=" * 70)
+    report_lines.append(f"\nMétodos comparados: {methods}")
+    report_lines.append(f"Total de registros SRG: {len(srg_df)}\n")
+
+    # ── Estadísticos descriptivos ─────────────────────────────────────────────
+    report_lines.append("─" * 70)
+    report_lines.append("ESTADÍSTICOS DESCRIPTIVOS  (por task × split × method)")
+    report_lines.append("─" * 70)
+
+    desc = (
+        srg_df.groupby(["task", "split", "method"])["srg"]
+        .agg(["count", "mean", "std", "median",
+              lambda x: x.quantile(0.25),
+              lambda x: x.quantile(0.75),
+              "min", "max"])
+        .rename(columns={"<lambda_0>": "q25", "<lambda_1>": "q75"})
+    )
+    report_lines.append(desc.to_string())
+    report_lines.append("")
+
+    # ── Tests estadísticos por (task, split) ──────────────────────────────────
+    report_lines.append("─" * 70)
+    if n_methods == 2:
+        report_lines.append(
+            "TEST WILCOXON SIGNED-RANK  (H0: distribuciones iguales, α=0.05)\n"
+            "Prueba emparejada por WSI dentro de cada (task, split)."
+        )
+    else:
+        report_lines.append(
+            "TEST KRUSKAL-WALLIS  (H0: distribuciones iguales, α=0.05)\n"
+            "Seguido de Mann-Whitney con corrección Bonferroni."
+        )
+    report_lines.append("─" * 70)
+
+    for (task, split), group_df in srg_df.groupby(["task", "split"]):
+        report_lines.append(f"\n  [{task}] — split: {split}")
+
+        if n_methods == 2:
+            m1, m2 = methods
+            g1 = group_df[group_df["method"] == m1].sort_values("wsi_stem")
+            g2 = group_df[group_df["method"] == m2].sort_values("wsi_stem")
+
+            # Emparejar por wsi_stem
+            common = set(g1["wsi_stem"]) & set(g2["wsi_stem"])
+            if len(common) < 5:
+                report_lines.append(
+                    f"    [SKIP] Menos de 5 WSIs emparejadas ({len(common)}). "
+                    "Test no aplicable."
+                )
+                continue
+
+            g1c = g1[g1["wsi_stem"].isin(common)].set_index("wsi_stem")["srg"]
+            g2c = g2[g2["wsi_stem"].isin(common)].set_index("wsi_stem")["srg"]
+            g1c, g2c = g1c.align(g2c, join="inner")
+
+            stat, p = stats.wilcoxon(g1c.values, g2c.values, alternative="two-sided")
+            sig = "✓ SIGNIFICATIVO" if p < 0.05 else "✗ no significativo"
+            report_lines.append(
+                f"    Wilcoxon: W={stat:.4f}  p={p:.4e}  n={len(g1c)}  → {sig}"
+            )
+            diff = g1c - g2c
+            report_lines.append(
+                f"    Diferencia media ({m1} − {m2}): "
+                f"{diff.mean():.4f}  (mediana: {diff.median():.4f})"
+            )
+            report_lines.append(
+                f"    Medias — {m1}: {g1c.mean():.4f}  |  {m2}: {g2c.mean():.4f}"
+            )
+
+        else:
+            groups = [
+                group_df[group_df["method"] == m]["srg"].values
+                for m in methods
+            ]
+            # Solo ejecutar si todos los grupos tienen suficientes datos
+            if any(len(g) < 3 for g in groups):
+                report_lines.append("    [SKIP] Algún grupo tiene < 3 muestras.")
+                continue
+
+            stat_kw, p_kw = stats.kruskal(*groups)
+            sig_kw = "✓ SIGNIFICATIVO" if p_kw < 0.05 else "✗ no significativo"
+            report_lines.append(
+                f"    Kruskal-Wallis: H={stat_kw:.4f}  p={p_kw:.4e}  → {sig_kw}"
+            )
+
+            # Post-hoc Mann-Whitney con Bonferroni
+            from itertools import combinations
+            pairs  = list(combinations(methods, 2))
+            alpha_bonf = 0.05 / len(pairs)
+            report_lines.append(
+                f"    Post-hoc Mann-Whitney (α Bonferroni = {alpha_bonf:.4e}):"
+            )
+            for m1, m2 in pairs:
+                v1 = group_df[group_df["method"] == m1]["srg"].values
+                v2 = group_df[group_df["method"] == m2]["srg"].values
+                u, p_mw = stats.mannwhitneyu(v1, v2, alternative="two-sided")
+                sig_mw = "✓" if p_mw < alpha_bonf else "✗"
+                report_lines.append(
+                    f"      {m1} vs {m2}: U={u:.1f}  p={p_mw:.4e}  {sig_mw}"
+                )
+
+    report_lines.append("\n" + "=" * 70)
+
+    # ── Guardar ───────────────────────────────────────────────────────────────
+    analysis_path = os.path.join(output_path, "srg_statistical_analysis.txt")
+    with open(analysis_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines))
+    print(f"\n  [SRG] Análisis estadístico guardado: {analysis_path}")
+
+    # Imprimir resumen en consola
+    for line in report_lines:
+        print(line)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PIPELINE POR TAREA Y SPLIT
 # ──────────────────────────────────────────────────────────────────────────────
 
 def process_task_on_split(
     split_name: str,
-    df_selected: pd.DataFrame,
+    df_images: pd.DataFrame,
+    df_srg: pd.DataFrame | None,
     task: str,
     model,
     use_precomputed: bool,
@@ -700,31 +947,68 @@ def process_task_on_split(
     output_format: str,
     overlay_alpha: float,
     explanation_method: str,
-):
+    compute_srg_flag: bool,
+    srg_n_bins: int,
+) -> list[dict]:
     """
-    Procesa las N WSIs fijas del split con el modelo de `task`.
+    Procesa las WSIs del split con el modelo de `task`.
+
+    - Genera imágenes para las primeras N WSIs (df_images).
+    - Calcula SRG para todas las WSIs indicadas en df_srg (si compute_srg_flag=True).
+
+    Las dos selecciones son independientes: se itera sobre la unión y se decide
+    qué hacer con cada WSI según a qué conjunto pertenece.
 
     Estructura de salida por WSI:
         <output_split_path>/<wsi_stem>/<task>_<method>_<outcome>_pred<P>_true<T>/
             wsi.<fmt>   heatmap.<fmt>   overlay.<fmt>
+
+    Returns
+    -------
+    list[dict] : registros SRG [{wsi_stem, task, split, method, srg, pred, true}, ...]no
     """
     fmt = output_format.lower()
-    print(f"\n  [{split_name}] Tarea '{task}' — método '{explanation_method}' — "
-          f"construyendo dataset...")
+    srg_records: list[dict] = []
 
-    # ── Construir dataset ─────────────────────────────────────────────────────
+    print(f"\n  [{split_name}] Tarea '{task}' — método '{explanation_method}'")
+
+    # ── Unión de WSIs (imágenes + SRG) ───────────────────────────────────────
+    # Necesitamos construir un dataset que cubra todas las WSIs relevantes.
+    # La selección más amplia es la de SRG cuando existe (puede ser más grande).
+    if compute_srg_flag and df_srg is not None:
+        # Tomamos la unión de índices
+        df_all = (
+            pd.concat([df_images, df_srg])
+            .drop_duplicates(subset=["features"])
+            .reset_index(drop=True)
+        )
+    else:
+        df_all = df_images.copy().reset_index(drop=True)
+
+    image_stems = set(
+        os.path.splitext(os.path.basename(row["features"]))[0]
+        for _, row in df_images.iterrows()
+    )
+    srg_stems = set()
+    if compute_srg_flag and df_srg is not None:
+        srg_stems = set(
+            os.path.splitext(os.path.basename(row["features"]))[0]
+            for _, row in df_srg.iterrows()
+        )
+
+    print(f"  [{split_name}] Construyendo dataset...")
     try:
-        dataset, df_valid = build_dataset(df_selected, task, use_precomputed, emb_folder_enc)
+        dataset, df_valid = build_dataset(df_all, task, use_precomputed, emb_folder_enc)
     except Exception as e:
         print(f"  [ERROR] No se pudo construir el dataset para '{task}': {e}")
-        return
+        return srg_records
 
     n = len(dataset)
     if n == 0:
         print(f"  [WARN] Dataset vacío para tarea '{task}' en {split_name}.")
-        return
+        return srg_records
 
-    print(f"  [{split_name}] Tarea '{task}' → {n} WSIs")
+    print(f"  [{split_name}] Tarea '{task}' → {n} WSIs totales")
 
     loader = DataLoader(
         dataset,
@@ -747,7 +1031,14 @@ def process_task_on_split(
 
         wsi_stem = os.path.splitext(os.path.basename(h5_path))[0]
 
-        print(f"\n    WSI {batch_idx+1}/{n} — {wsi_stem}  (true_{task}={true_label})")
+        do_images = wsi_stem in image_stems
+        do_srg    = compute_srg_flag and (wsi_stem in srg_stems)
+
+        if not do_images and not do_srg:
+            continue
+
+        print(f"\n    WSI {batch_idx+1}/{n} — {wsi_stem}  (true_{task}={true_label})"
+              f"  [imágenes={do_images}, srg={do_srg}]")
 
         # ── Saltar etiqueta inválida ──────────────────────────────────────────
         if true_label == -1:
@@ -775,6 +1066,35 @@ def process_task_on_split(
         print(f"      probs={[f'{p:.3f}' for p in probs]}")
         print(f"      scores ({explanation_method}) — "
               f"min={weights.min():.4f}  max={weights.max():.4f}  mean={weights.mean():.4f}")
+
+        # ── SRG ───────────────────────────────────────────────────────────────
+        if do_srg:
+            try:
+                srg_value = compute_and_collect_srg(
+                    model      = model,
+                    features   = features.to(device),
+                    weights    = weights,
+                    pred_label = pred_label,
+                    device     = device,
+                    n_bins     = srg_n_bins,
+                )
+                print(f"      SRG ({explanation_method}): {srg_value:.4f}")
+                srg_records.append({
+                    "wsi_stem"  : wsi_stem,
+                    "task"      : task,
+                    "split"     : split_name,
+                    "method"    : explanation_method,
+                    "srg"       : srg_value,
+                    "pred_label": pred_label,
+                    "true_label": true_label,
+                    "outcome"   : outcome,
+                })
+            except Exception as e:
+                print(f"      [ERROR] SRG fallido: {e}")
+
+        # ── Imágenes (solo para las N seleccionadas) ──────────────────────────
+        if not do_images:
+            continue
 
         # ── Coordenadas ───────────────────────────────────────────────────────
         if coords is None:
@@ -804,7 +1124,9 @@ def process_task_on_split(
             n_min      = min(len(pil_imgs), len(coords_arr))
             pil_imgs   = pil_imgs[:n_min]
             coords_arr = coords_arr[:n_min]
-            weights    = weights[:n_min]
+            weights_img = weights[:n_min]
+        else:
+            weights_img = weights
 
         # ── Reconstrucción WSI ────────────────────────────────────────────────
         try:
@@ -820,7 +1142,7 @@ def process_task_on_split(
         # ── Máscara de calor ──────────────────────────────────────────────────
         try:
             heatmap_mask = build_heatmap_mask(
-                coords_arr, weights, wsi_img.size, patch_size_out, scale, origin
+                coords_arr, weights_img, wsi_img.size, patch_size_out, scale, origin
             )
         except Exception as e:
             print(f"      [ERROR] Máscara de calor fallida: {e}")
@@ -833,9 +1155,7 @@ def process_task_on_split(
             print(f"      [ERROR] Overlay fallido: {e}")
             continue
 
-        # ── Guardar ───────────────────────────────────────────────────────────
-        # El nombre de carpeta incluye el método para que no haya colisiones
-        # al ejecutar ambos métodos sobre el mismo experimento.
+        # ── Guardar imágenes ──────────────────────────────────────────────────
         folder_tag = f"{task}_{explanation_method}_{outcome}_pred{pred_label}_true{true_label}"
         out_dir    = os.path.join(output_split_path, wsi_stem, folder_tag)
         os.makedirs(out_dir, exist_ok=True)
@@ -851,6 +1171,8 @@ def process_task_on_split(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    return srg_records
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -877,129 +1199,180 @@ def main():
 
 def _run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Dispositivo:          {device}")
-    print(f"Salida:               {args.output_path}")
-    print(f"test_results:         {args.test_results_path}")
-    print(f"Método explicación:   {args.explanation_method}")
+    print(f"Dispositivo:            {device}")
+    print(f"Salida:                 {args.output_path}")
+    print(f"test_results:           {args.test_results_path}")
+    print(f"Métodos explicación:    {args.explanation_method}")
+    print(f"Procesar dev_set:       {args.use_dev_set}")
+    print(f"Calcular SRG:           {args.compute_srg}")
+    if args.compute_srg:
+        n_srg_str = str(args.n_srg) if args.n_srg is not None else "todas"
+        print(f"  WSIs para SRG:        {n_srg_str}")
+        print(f"  SRG n_bins:           {args.srg_n_bins}")
 
     # ── Splits ────────────────────────────────────────────────────────────────
     dev_df, test_df = load_splits(args)
 
-    print(f"\nSeleccionando {args.n_images} WSIs fijas por split...")
-    print("  dev_set:")
-    dev_selected  = select_wsis(dev_df,  args.n_images)
+    # ── Selección de WSIs para imágenes ───────────────────────────────────────
+    print(f"\nSeleccionando {args.n_images} WSIs fijas por split para generar imágenes...")
+    dev_images_selected  = None
+    if args.use_dev_set and dev_df is not None:
+        print("  dev_set:")
+        dev_images_selected = select_wsis(dev_df, args.n_images)
     print("  test_set:")
-    test_selected = select_wsis(test_df, args.n_images)
+    test_images_selected = select_wsis(test_df, args.n_images)
 
-    splits = {"dev_set": dev_selected, "test_set": test_selected}
+    # ── Selección de WSIs para SRG ─────────────────────────────────────────────
+    dev_srg_selected  = None
+    test_srg_selected = None
+    if args.compute_srg:
+        print(f"\nSeleccionando WSIs para cálculo de SRG...")
+        if args.use_dev_set and dev_df is not None:
+            print("  dev_set:")
+            dev_srg_selected  = select_wsis_srg(dev_df,  args.n_srg)
+        print("  test_set:")
+        test_srg_selected = select_wsis_srg(test_df, args.n_srg)
+
+    # Construir lista de splits a procesar
+    splits = {"test_set": (test_images_selected, test_srg_selected)}
+    if args.use_dev_set and dev_df is not None:
+        splits["dev_set"] = (dev_images_selected, dev_srg_selected)
 
     use_embeddings_root = args.embeddings_folder is not None
     print(f"\nModo embeddings precomputados: {use_embeddings_root}")
 
-    # ── Bucle por tareas ──────────────────────────────────────────────────────
-    for task in args.tasks:
-        task_results_path = os.path.join(args.test_results_path, task)
+    # Acumulador global de registros SRG (todos los métodos, tareas y splits)
+    all_srg_records: list[dict] = []
 
-        print(f"\n{'='*65}")
-        print(f"  TAREA: {task}  |  Método: {args.explanation_method}")
-        print(f"{'='*65}")
+    # ── Bucle por MÉTODOS (batería) ───────────────────────────────────────────
+    for explanation_method in args.explanation_method:
+        print(f"\n{'#'*65}")
+        print(f"  MÉTODO DE EXPLICACIÓN: {explanation_method}")
+        print(f"{'#'*65}")
 
-        config_path = os.path.join(task_results_path, "best_config.json")
-        if not os.path.isfile(config_path):
-            print(f"  [SKIP] best_config.json no encontrado en: {task_results_path}")
-            continue
+        # ── Bucle por tareas ──────────────────────────────────────────────────
+        for task in args.tasks:
+            task_results_path = os.path.join(args.test_results_path, task)
 
-        with open(config_path) as f:
-            cfg = json.load(f)
+            print(f"\n{'='*65}")
+            print(f"  TAREA: {task}  |  Método: {explanation_method}")
+            print(f"{'='*65}")
 
-        hyperparams = cfg["selected"]["hyperparams"]
-        enc_name    = hyperparams["model"]
-        mil_mode    = hyperparams["mil"]
-
-        # Validar compatibilidad antes de cargar pesos
-        if args.explanation_method == "attention":
-            if mil_mode not in SUPPORTED_MIL_ATTENTION:
-                print(
-                    f"  [SKIP] Método 'attention' no soportado para MIL '{mil_mode}'. "
-                    f"Compatible con: {SUPPORTED_MIL_ATTENTION}. "
-                    f"Usa --explanation_method single."
-                )
-                continue
-        elif args.explanation_method == "single":
-            if mil_mode not in SUPPORTED_MIL_SINGLE:
-                print(
-                    f"  [SKIP] Método 'single' no listado para MIL '{mil_mode}'. "
-                    f"Añádela a SUPPORTED_MIL_SINGLE si el modelo tiene forward estándar."
-                )
+            config_path = os.path.join(task_results_path, "best_config.json")
+            if not os.path.isfile(config_path):
+                print(f"  [SKIP] best_config.json no encontrado en: {task_results_path}")
                 continue
 
-        print(f"  Encoder: {enc_name}  |  MIL: {mil_mode}")
+            with open(config_path) as f:
+                cfg = json.load(f)
 
-        # Resolver carpeta de embeddings para este encoder
-        emb_folder_enc  = None
-        use_precomputed = False
+            hyperparams = cfg["selected"]["hyperparams"]
+            enc_name    = hyperparams["model"]
+            mil_mode    = hyperparams["mil"]
 
-        if use_embeddings_root:
-            candidate = os.path.join(args.embeddings_folder, enc_name)
-            if os.path.isdir(candidate):
-                emb_folder_enc  = candidate
-                use_precomputed = True
-            else:
+            # Validar compatibilidad antes de cargar pesos
+            if explanation_method == "attention":
+                if mil_mode not in SUPPORTED_MIL_ATTENTION:
+                    print(
+                        f"  [SKIP] Método 'attention' no soportado para MIL '{mil_mode}'. "
+                        f"Compatible con: {SUPPORTED_MIL_ATTENTION}. "
+                        f"Usa --explanation_method single."
+                    )
+                    continue
+            elif explanation_method == "single":
+                if mil_mode not in SUPPORTED_MIL_SINGLE:
+                    print(
+                        f"  [SKIP] Método 'single' no listado para MIL '{mil_mode}'. "
+                        f"Añádela a SUPPORTED_MIL_SINGLE si el modelo tiene forward estándar."
+                    )
+                    continue
+
+            print(f"  Encoder: {enc_name}  |  MIL: {mil_mode}")
+
+            # Resolver carpeta de embeddings para este encoder
+            emb_folder_enc  = None
+            use_precomputed = False
+
+            if use_embeddings_root:
+                candidate = os.path.join(args.embeddings_folder, enc_name)
+                if os.path.isdir(candidate):
+                    emb_folder_enc  = candidate
+                    use_precomputed = True
+                else:
+                    print(
+                        f"  [WARN] Carpeta de embeddings no encontrada: {candidate}. "
+                        "Se usarán parches directamente."
+                    )
+
+            # Aviso de rendimiento para Single sin embeddings precomputados
+            if explanation_method == "single" and not use_precomputed:
                 print(
-                    f"  [WARN] Carpeta de embeddings no encontrada: {candidate}. "
-                    "Se usarán parches directamente."
+                    "  [WARN] Método 'single' sin embeddings precomputados puede ser muy lento: "
+                    "cada parche requiere extraer features + forward del modelo. "
+                    "Se recomienda usar --embeddings_folder."
                 )
 
-        # Aviso de rendimiento para Single sin embeddings precomputados
-        if args.explanation_method == "single" and not use_precomputed:
-            print(
-                "  [WARN] Método 'single' sin embeddings precomputados puede ser muy lento: "
-                "cada parche requiere extraer features + forward del modelo. "
-                "Se recomienda usar --embeddings_folder."
-            )
+            num_classes = 4 if task == "molecular_subtype" else 2
 
-        num_classes = 4 if task == "molecular_subtype" else 2
+            # ── Cargar modelo ─────────────────────────────────────────────────
+            try:
+                model, _, _ = load_trained_model(
+                    task_results_path  = task_results_path,
+                    task               = task,
+                    num_classes        = num_classes,
+                    use_precomputed    = use_precomputed,
+                    device             = device,
+                    explanation_method = explanation_method,
+                )
+            except (ValueError, FileNotFoundError) as e:
+                print(f"  [SKIP] {e}")
+                continue
+            except Exception as e:
+                print(f"  [ERROR] Carga del modelo fallida: {e}")
+                continue
 
-        # ── Cargar modelo ─────────────────────────────────────────────────────
-        try:
-            model, _, _ = load_trained_model(
-                task_results_path  = task_results_path,
-                task               = task,
-                num_classes        = num_classes,
-                use_precomputed    = use_precomputed,
-                device             = device,
-                explanation_method = args.explanation_method,
-            )
-        except (ValueError, FileNotFoundError) as e:
-            print(f"  [SKIP] {e}")
-            continue
-        except Exception as e:
-            print(f"  [ERROR] Carga del modelo fallida: {e}")
-            continue
+            # ── Procesar splits ───────────────────────────────────────────────
+            for split_name, (df_images, df_srg) in splits.items():
+                srg_records = process_task_on_split(
+                    split_name         = split_name,
+                    df_images          = df_images,
+                    df_srg             = df_srg,
+                    task               = task,
+                    model              = model,
+                    use_precomputed    = use_precomputed,
+                    emb_folder_enc     = emb_folder_enc,
+                    device             = device,
+                    output_split_path  = os.path.join(args.output_path, split_name),
+                    max_output_pixels  = args.max_output_pixels,
+                    output_format      = args.output_format,
+                    overlay_alpha      = args.overlay_alpha,
+                    explanation_method = explanation_method,
+                    compute_srg_flag   = args.compute_srg,
+                    srg_n_bins         = args.srg_n_bins,
+                )
+                all_srg_records.extend(srg_records)
 
-        # ── Procesar dev y test ───────────────────────────────────────────────
-        for split_name, df_selected in splits.items():
-            process_task_on_split(
-                split_name         = split_name,
-                df_selected        = df_selected,
-                task               = task,
-                model              = model,
-                use_precomputed    = use_precomputed,
-                emb_folder_enc     = emb_folder_enc,
-                device             = device,
-                output_split_path  = os.path.join(args.output_path, split_name),
-                max_output_pixels  = args.max_output_pixels,
-                output_format      = args.output_format,
-                overlay_alpha      = args.overlay_alpha,
-                explanation_method = args.explanation_method,
-            )
+            # ── Liberar modelo ────────────────────────────────────────────────
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print(f"\n  Modelo '{task}' liberado.")
 
-        # ── Liberar modelo ────────────────────────────────────────────────────
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        print(f"\n  Modelo '{task}' liberado.")
+    # ── Guardar CSV de SRG ────────────────────────────────────────────────────
+    if args.compute_srg and all_srg_records:
+        srg_df       = pd.DataFrame(all_srg_records)
+        srg_csv_path = os.path.join(args.output_path, "srg_results.csv")
+        srg_df.to_csv(srg_csv_path, index=False)
+        print(f"\n  [SRG] Resultados guardados en: {srg_csv_path}")
+        print(f"  [SRG] Total de registros: {len(srg_df)}")
+        print(srg_df.groupby(["task", "split", "method"])["srg"].describe().to_string())
+
+        # ── Análisis estadístico ──────────────────────────────────────────────
+        statistical_analysis_srg(srg_df, args.output_path)
+
+    elif args.compute_srg:
+        print("\n  [SRG] No se recopilaron registros SRG.")
 
     print(f"\n{'='*65}")
     print(f"  Mapas generados en:  {args.output_path}")
