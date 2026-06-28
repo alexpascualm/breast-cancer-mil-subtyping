@@ -35,8 +35,9 @@ Salidas
         subtype_from_pred_biomarkers   ← subtipo inferido de biomarcadores predichos
 
   subtype_report.txt
-      - Classification report: subtype_from_pred_biomarkers vs subtype_from_true_biomarkers
-      - Comparativa: subtype_from_true_biomarkers vs molecular_subtype_true (etiqueta original)
+      - Reporte 1: subtype_from_pred_biomarkers vs subtype_from_true_biomarkers
+      - Reporte 2: subtype_from_pred_biomarkers vs molecular_subtype_true (etiqueta original)
+      - Análisis de concordancia: subtype_from_true_biomarkers vs molecular_subtype_true
 
 Uso
 ---
@@ -216,6 +217,113 @@ def fmt_classification_report(
     return "\n".join(lines)
 
 
+def fmt_concordance_analysis(df_s: pd.DataFrame, has_original: bool) -> list[str]:
+    """
+    Genera el bloque de análisis de concordancia entre el subtipo inferido
+    desde biomarcadores reales y la etiqueta original molecular_subtype_true.
+
+    Retorna una lista de strings lista para añadir a report_blocks.
+    """
+    lines = []
+    lines.append("─" * 70)
+    lines.append("  ANÁLISIS DE CONCORDANCIA: SUBTIPO IHC REAL vs ETIQUETA ORIGINAL")
+    lines.append("─" * 70)
+
+    if not has_original:
+        lines.append(
+            "\n  [INFO] Columna 'molecular_subtype_true' no disponible o sin valores válidos.\n"
+            "  Se omite el análisis de concordancia.\n"
+        )
+        return lines
+
+    mask_valid = (
+        df_s["molecular_subtype_true"].notna()
+        & (df_s["molecular_subtype_true"] != -1)
+        & df_s["subtype_from_true_biomarkers"].notna()
+    )
+    df_conc = df_s[mask_valid].copy()
+
+    if df_conc.empty:
+        lines.append("\n  [INFO] Sin filas válidas para el análisis de concordancia.\n")
+        return lines
+
+    n_total = len(df_conc)
+    agree_mask = (
+        df_conc["molecular_subtype_true"].astype(int)
+        == df_conc["subtype_from_true_biomarkers"].astype(int)
+    )
+    n_agree = agree_mask.sum()
+    pct_agree = n_agree / n_total * 100
+
+    lines.append(
+        f"\n  Concordancia global (subtipo IHC real == etiqueta original): "
+        f"{n_agree}/{n_total} ({pct_agree:.1f}%)\n"
+    )
+
+    # Tabla de concordancia por subtipo
+    lines.append("  Detalle por subtipo (según etiqueta original):")
+    header = f"  {'Subtipo':<15}  {'N':<6}  {'Concordantes':<13}  {'Discordantes':<13}  {'% Conc.'}"
+    lines.append(header)
+    lines.append("  " + "-" * 62)
+
+    for sub_id in SUBTYPE_ORDER:
+        sub_name = SUBTYPE_NAMES[sub_id]
+        sub_mask = df_conc["molecular_subtype_true"].astype(int) == sub_id
+        sub_df   = df_conc[sub_mask]
+        n_sub    = len(sub_df)
+        if n_sub == 0:
+            continue
+        n_conc  = (sub_df["subtype_from_true_biomarkers"].astype(int) == sub_id).sum()
+        n_disc  = n_sub - n_conc
+        pct_sub = n_conc / n_sub * 100
+        lines.append(
+            f"  {sub_name:<15}  {n_sub:<6}  {n_conc:<13}  {n_disc:<13}  {pct_sub:.1f}%"
+        )
+
+    lines.append("")
+
+    # Tabla de discordancias: para cada subtipo original, a qué subtipo IHC se asigna
+    lines.append("  Tabla de confusión de concordancia (filas=etiqueta original, columnas=subtipo IHC real):")
+    col_header = "  " + f"{'':15}" + "  ".join(f"{n:>13}" for n in SUBTYPE_LABELS)
+    lines.append(col_header)
+
+    y_orig = df_conc["molecular_subtype_true"].astype(int).tolist()
+    y_ihc  = df_conc["subtype_from_true_biomarkers"].astype(int).tolist()
+    cm     = confusion_matrix(y_orig, y_ihc, labels=SUBTYPE_ORDER)
+
+    for i, row_cm in enumerate(cm):
+        row_label = SUBTYPE_LABELS[i]
+        row_str   = "  ".join(f"{v:>13}" for v in row_cm)
+        lines.append(f"  {row_label:<15} {row_str}")
+
+    lines.append("")
+
+    # Desglose de discordancias por subtipo
+    lines.append("  Desglose de discordancias (casos etiqueta original ≠ subtipo IHC real):")
+    df_disc = df_conc[~agree_mask]
+    if df_disc.empty:
+        lines.append("  ¡Sin discordancias!\n")
+        return lines
+
+    for sub_id in SUBTYPE_ORDER:
+        sub_name = SUBTYPE_NAMES[sub_id]
+        sub_mask = df_disc["molecular_subtype_true"].astype(int) == sub_id
+        sub_df   = df_disc[sub_mask]
+        if sub_df.empty:
+            continue
+        lines.append(f"\n  Etiqueta original = {sub_name} ({len(sub_df)} discordantes):")
+        assigned = (
+            sub_df["subtype_from_true_biomarkers"]
+            .map(SUBTYPE_NAMES)
+            .value_counts()
+        )
+        for assigned_name, count in assigned.items():
+            lines.append(f"    → {assigned_name:<15}: {count} casos")
+
+    lines.append("")
+    return lines
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ARGS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -347,8 +455,14 @@ def main():
         report_blocks.append(f"  SPLIT: {split_name}  (N={n})")
         report_blocks.append(f"{'#'*70}")
 
-        # ── 1. Predicho (desde biomarcadores predichos) vs
-        #         Real (desde biomarcadores reales) ────────────────────────────
+        has_original = (
+            "molecular_subtype_true" in df_s.columns
+            and df_s["molecular_subtype_true"].notna().any()
+            and (df_s["molecular_subtype_true"] != -1).any()
+        )
+
+        # ── Reporte 1: subtipo predicho (biomarcadores predichos) vs
+        #              subtipo real (biomarcadores reales) ─────────────────────
         report_blocks.append(
             fmt_classification_report(
                 y_true       = df_s["subtype_from_true_biomarkers"].tolist(),
@@ -362,16 +476,9 @@ def main():
             )
         )
 
-        # ── 2. Subtipo real (biomarcadores reales) vs
-        #         Etiqueta original molecular_subtype_true ─────────────────────
-        has_original = (
-            "molecular_subtype_true" in df_s.columns
-            and df_s["molecular_subtype_true"].notna().any()
-            and (df_s["molecular_subtype_true"] != -1).any()
-        )
-
+        # ── Reporte 2: subtipo predicho (biomarcadores predichos) vs
+        #              etiqueta original molecular_subtype_true ────────────────
         if has_original:
-            # Filtrar filas donde la etiqueta original es válida
             mask_valid = (
                 df_s["molecular_subtype_true"].notna()
                 & (df_s["molecular_subtype_true"] != -1)
@@ -381,57 +488,25 @@ def main():
             report_blocks.append(
                 fmt_classification_report(
                     y_true       = df_comp["molecular_subtype_true"].tolist(),
-                    y_pred       = df_comp["subtype_from_true_biomarkers"].tolist(),
+                    y_pred       = df_comp["subtype_from_pred_biomarkers"].tolist(),
                     title        = (
-                        "REPORTE 2 — Subtipo real desde biomarcadores reales vs\n"
+                        "REPORTE 2 — Subtipo predicho (biomarcadores predichos) vs\n"
                         "            Etiqueta original molecular_subtype_true\n"
-                        "  → Mide la coherencia entre la clasificación surrogate IHC\n"
-                        "    y la etiqueta original del dataset.\n"
-                        "  Nota: discrepancias pueden deberse a criterios clínicos\n"
-                        "    adicionales no capturados por la tabla surrogate."
+                        "  → Mide directamente si el subtipo inferido por el modelo\n"
+                        "    coincide con la etiqueta clínica de referencia."
                     ),
                 )
             )
-
-            # Concordancia simple
-            both_valid = (
-                df_comp["molecular_subtype_true"].notna()
-                & df_comp["subtype_from_true_biomarkers"].notna()
-            )
-            df_both = df_comp[both_valid]
-            if len(df_both) > 0:
-                agree = (
-                    df_both["molecular_subtype_true"].astype(int)
-                    == df_both["subtype_from_true_biomarkers"].astype(int)
-                ).sum()
-                pct = agree / len(df_both) * 100
-                report_blocks.append(
-                    f"  Concordancia directa (etiqueta original == subtipo IHC): "
-                    f"{agree}/{len(df_both)} ({pct:.1f}%)\n"
-                )
-
-                # Tabla de discordancias por subtipo
-                report_blocks.append("  Discordancias por subtipo original:")
-                for sub_id in SUBTYPE_ORDER:
-                    sub_name = SUBTYPE_NAMES[sub_id]
-                    sub_mask = df_both["molecular_subtype_true"].astype(int) == sub_id
-                    sub_df   = df_both[sub_mask]
-                    if sub_df.empty:
-                        continue
-                    discords = (
-                        sub_df["subtype_from_true_biomarkers"].astype(int) != sub_id
-                    ).sum()
-                    report_blocks.append(
-                        f"    {sub_name:<15}: {discords}/{len(sub_df)} discordantes"
-                    )
-                report_blocks.append("")
         else:
             report_blocks.append(
                 "\n  [INFO] Columna 'molecular_subtype_true' no disponible o sin valores válidos.\n"
-                "  Se omite la comparativa con la etiqueta original.\n"
+                "  Se omite el Reporte 2.\n"
             )
 
-        # ── 3. Tabla resumen: distribuciones ─────────────────────────────────
+        # ── Análisis de concordancia: subtipo IHC real vs etiqueta original ───
+        report_blocks.extend(fmt_concordance_analysis(df_s, has_original))
+
+        # ── Tabla resumen: distribuciones ─────────────────────────────────────
         report_blocks.append("─" * 70)
         report_blocks.append("  DISTRIBUCIÓN DE SUBTIPOS")
         report_blocks.append("─" * 70)
