@@ -56,7 +56,12 @@ import sys
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    balanced_accuracy_score,
+    cohen_kappa_score,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,7 +175,8 @@ def fmt_classification_report(
     labels: list[int] | None = None,
 ) -> str:
     """
-    Genera un bloque de texto con título + classification report + matriz de confusión.
+    Genera un bloque de texto con título + classification report +
+    balanced accuracy + Cohen's kappa + matriz de confusión.
     Filtra automáticamente las filas donde y_true o y_pred sea NaN/None.
     """
     # Filtrar NaN
@@ -203,7 +209,20 @@ def fmt_classification_report(
     )
     lines.append(report)
 
-    # Matriz de confusión
+    # ── Balanced accuracy ─────────────────────────────────────────────────────
+    ba = balanced_accuracy_score(yt, yp)
+    lines.append(f"  Balanced accuracy          : {ba:.4f}")
+
+    # ── Cohen's kappa ─────────────────────────────────────────────────────────
+    # Se calculan tanto el kappa estándar (linear) como el ponderado (quadratic)
+    # para ofrecer una imagen más completa del acuerdo inter-clase.
+    kappa_linear    = cohen_kappa_score(yt, yp, weights=None)
+    kappa_quadratic = cohen_kappa_score(yt, yp, weights="quadratic")
+    lines.append(f"  Cohen's kappa (unweighted) : {kappa_linear:.4f}")
+    lines.append(f"  Cohen's kappa (quadratic)  : {kappa_quadratic:.4f}")
+    lines.append("")
+
+    # ── Matriz de confusión ───────────────────────────────────────────────────
     cm = confusion_matrix(yt, yp, labels=labels or SUBTYPE_ORDER)
     lines.append("Matriz de confusión (filas=real, columnas=predicho):")
     header = "  " + "  ".join(f"{n:>13}" for n in (target_names or SUBTYPE_LABELS))
@@ -248,27 +267,38 @@ def fmt_concordance_analysis(df_s: pd.DataFrame, has_original: bool) -> list[str
         return lines
 
     n_total = len(df_conc)
-    agree_mask = (
-        df_conc["molecular_subtype_true"].astype(int)
-        == df_conc["subtype_from_true_biomarkers"].astype(int)
-    )
-    n_agree = agree_mask.sum()
-    pct_agree = n_agree / n_total * 100
+    y_orig  = df_conc["molecular_subtype_true"].astype(int).tolist()
+    y_ihc   = df_conc["subtype_from_true_biomarkers"].astype(int).tolist()
+
+    agree_mask = [o == i for o, i in zip(y_orig, y_ihc)]
+    n_agree    = sum(agree_mask)
+    pct_agree  = n_agree / n_total * 100
 
     lines.append(
         f"\n  Concordancia global (subtipo IHC real == etiqueta original): "
         f"{n_agree}/{n_total} ({pct_agree:.1f}%)\n"
     )
 
-    # Tabla de concordancia por subtipo
+    # ── Métricas de acuerdo globales ──────────────────────────────────────────
+    ba_conc      = balanced_accuracy_score(y_orig, y_ihc)
+    kappa_lin    = cohen_kappa_score(y_orig, y_ihc, weights=None)
+    kappa_quad   = cohen_kappa_score(y_orig, y_ihc, weights="quadratic")
+    lines.append(f"  Balanced accuracy          : {ba_conc:.4f}")
+    lines.append(f"  Cohen's kappa (unweighted) : {kappa_lin:.4f}")
+    lines.append(f"  Cohen's kappa (quadratic)  : {kappa_quad:.4f}\n")
+
+    # ── Tabla de concordancia por subtipo ─────────────────────────────────────
     lines.append("  Detalle por subtipo (según etiqueta original):")
     header = f"  {'Subtipo':<15}  {'N':<6}  {'Concordantes':<13}  {'Discordantes':<13}  {'% Conc.'}"
     lines.append(header)
     lines.append("  " + "-" * 62)
 
+    y_orig_s  = df_conc["molecular_subtype_true"].astype(int)
+    y_ihc_s   = df_conc["subtype_from_true_biomarkers"].astype(int)
+
     for sub_id in SUBTYPE_ORDER:
         sub_name = SUBTYPE_NAMES[sub_id]
-        sub_mask = df_conc["molecular_subtype_true"].astype(int) == sub_id
+        sub_mask = y_orig_s == sub_id
         sub_df   = df_conc[sub_mask]
         n_sub    = len(sub_df)
         if n_sub == 0:
@@ -282,15 +312,12 @@ def fmt_concordance_analysis(df_s: pd.DataFrame, has_original: bool) -> list[str
 
     lines.append("")
 
-    # Tabla de discordancias: para cada subtipo original, a qué subtipo IHC se asigna
+    # ── Tabla de confusión de concordancia ────────────────────────────────────
     lines.append("  Tabla de confusión de concordancia (filas=etiqueta original, columnas=subtipo IHC real):")
     col_header = "  " + f"{'':15}" + "  ".join(f"{n:>13}" for n in SUBTYPE_LABELS)
     lines.append(col_header)
 
-    y_orig = df_conc["molecular_subtype_true"].astype(int).tolist()
-    y_ihc  = df_conc["subtype_from_true_biomarkers"].astype(int).tolist()
-    cm     = confusion_matrix(y_orig, y_ihc, labels=SUBTYPE_ORDER)
-
+    cm = confusion_matrix(y_orig, y_ihc, labels=SUBTYPE_ORDER)
     for i, row_cm in enumerate(cm):
         row_label = SUBTYPE_LABELS[i]
         row_str   = "  ".join(f"{v:>13}" for v in row_cm)
@@ -298,9 +325,9 @@ def fmt_concordance_analysis(df_s: pd.DataFrame, has_original: bool) -> list[str
 
     lines.append("")
 
-    # Desglose de discordancias por subtipo
+    # ── Desglose de discordancias por subtipo ─────────────────────────────────
     lines.append("  Desglose de discordancias (casos etiqueta original ≠ subtipo IHC real):")
-    df_disc = df_conc[~agree_mask]
+    df_disc = df_conc[[not a for a in agree_mask]]
     if df_disc.empty:
         lines.append("  ¡Sin discordancias!\n")
         return lines
@@ -445,6 +472,13 @@ def main():
         "\nConvención de labels binarios:\n"
         "  er/pr/her2 : 0=negativo, 1=positivo\n"
         "  ki67       : 0=bajo,     1=alto\n"
+        "\nMétricas de evaluación:\n"
+        "  · Balanced accuracy          — media de recalls por clase;\n"
+        "    robusta ante desequilibrio de clases.\n"
+        "  · Cohen's kappa (unweighted) — acuerdo corregido por azar;\n"
+        "    trata todos los errores igual.\n"
+        "  · Cohen's kappa (quadratic)  — penaliza más los errores lejanos\n"
+        "    al subtipo real; útil cuando el orden importa.\n"
     )
 
     for split_name in splits_present:
