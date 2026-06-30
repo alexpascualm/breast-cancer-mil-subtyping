@@ -44,14 +44,10 @@ Estructura de salida
       ...
 
 Uso mínimo:
-  python generate_attention_maps.py --test_results_path /workspace/results/my_run/test_results
+  python generate_heatmaps.py --test_results_path /workspace/results/my_run/test_results
 
-Ejemplo en batería con SRG:
-  python generate_attention_maps.py \\
-      --test_results_path /workspace/results/my_run/test_results \\
-      --explanation_method attention single \\
-      --compute_srg \\
-      --use_dev_set
+Ejemplo con SRG:
+  python generate_heatmaps.py --test_results_path /workspace/results/my_run/test_results --compute_srg 
 """
 
 import argparse
@@ -197,7 +193,7 @@ def parse_args():
         "--output_path", type=str, default=None,
         help=(
             "Carpeta de salida. "
-            "Por defecto: <parent de test_results_path>/attention_maps "
+            "Por defecto: <parent de test_results_path>/heatmaps "
             "(mismo nivel que test_results/)."
         )
     )
@@ -1038,7 +1034,7 @@ def process_task_on_split(
             continue
 
         print(f"\n    WSI {batch_idx+1}/{n} — {wsi_stem}  (true_{task}={true_label})"
-              f"  [imágenes={do_images}, srg={do_srg}]")
+              f"  [generate_heatmaps_images={do_images}, srg={do_srg}]")
 
         # ── Saltar etiqueta inválida ──────────────────────────────────────────
         if true_label == -1:
@@ -1185,7 +1181,7 @@ def main():
 
     parent = os.path.dirname(os.path.abspath(args.test_results_path))
     if args.output_path is None:
-        args.output_path = os.path.join(parent, "attention_maps")
+        args.output_path = os.path.join(parent, "heatmaps")
     os.makedirs(args.output_path, exist_ok=True)
 
     logger = TeeLogger(os.path.join(args.output_path, "log.txt"))

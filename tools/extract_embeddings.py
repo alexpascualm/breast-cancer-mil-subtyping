@@ -14,7 +14,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from utils.train_utils import ENCODER_CONFIGS
 from models.patch_encoders import ENCODER_REGISTRY
-from data_load import create_file_label_df
+from data_load import create_file_label_df, patch_transform
 from config import bcnb_images_folder_path, bcnb_labels_df_path, bcnb_embeddings_path
 
 
@@ -65,13 +65,7 @@ def extract_embeddings(args):
     )
     print(f"WSIs encontradas: {len(df)}", flush=True)
 
-    transform = T.Compose([
-        T.Resize((args.patch_resize_size, args.patch_resize_size),
-                 interpolation=T.InterpolationMode.BICUBIC, antialias=True),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]),
-    ])
+    transform = patch_transform
 
     skipped, processed, failed = 0, 0, 0
     patch_counts = []
