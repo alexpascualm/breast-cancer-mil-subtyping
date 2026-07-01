@@ -96,17 +96,6 @@ def create_file_label_df(
     return pd.DataFrame(records)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Transform for patch images
-# ──────────────────────────────────────────────────────────────────────────────
-
-patch_transform = T.Compose([
-            T.Resize((patch_resize_size, patch_resize_size), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225]),
-        ])
-
-# ──────────────────────────────────────────────────────────────────────────────
 # DATASETS - Patches and Embeddings
 # ──────────────────────────────────────────────────────────────────────────────
 class Patches_WSI_Dataset(Dataset):
@@ -156,7 +145,12 @@ class Patches_WSI_Dataset(Dataset):
         self.patch_resize_size = patch_resize_size
         self.load_on_demand    = bool(load_on_demand)
 
-        self.transform = patch_transform
+        self.transform = T.Compose([
+            T.Resize((patch_resize_size, patch_resize_size), interpolation=T.InterpolationMode.BICUBIC, antialias=True),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+        ])
 
         self.images, self.labels, self.wsi_ids, self.coords = [], [], [], []
 
