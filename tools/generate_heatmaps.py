@@ -104,8 +104,12 @@ SUPPORTED_MIL_ATTENTION = [
 
 # MIL compatibles con el método 'single' (cualquiera que soporte forward_from_embeddings o forward estándar)
 SUPPORTED_MIL_SINGLE = [
-    "abMIL-bag-level",
+    "max-instance-level",
+    "max-bag-level",
+    "mean-instance-level",
+    "mean-bag-level",
     "abMIL-instance-level",
+    "abMIL-bag-level",
     "transMIL",
 ]
 
@@ -271,10 +275,9 @@ def _compute_attention_weights(model, features, device, use_precomputed) -> tupl
     probs      : ndarray (num_classes,)
     weights    : ndarray (N_patches,)
     """
-    pred_label, probs, raw = forward_bag(model, features, device, use_precomputed, return_raw=True)
-    weights_list = raw[2]
-    weights = weights_list[0].cpu().numpy()
-    return pred_label, probs, weights
+    out = forward_bag(model, features, device, use_precomputed)
+    weights = out.weights_list[0].cpu().numpy()
+    return out.pred_label, out.probs, weights
 
 
 def _compute_single_weights(model, features, device, use_precomputed) -> tuple:
@@ -291,16 +294,16 @@ def _compute_single_weights(model, features, device, use_precomputed) -> tuple:
     weights    : ndarray (N_patches,)  ← scores Single por parche
     """
     N = features.shape[0]
-    pred_label, probs = forward_bag(model, features, device, use_precomputed)
+    out = forward_bag(model, features, device, use_precomputed)
 
     scores = []
     for k in range(N):
         single_patch = features[k : k + 1]
-        _, probs_k = forward_bag(model, single_patch, device, use_precomputed)
-        scores.append(float(probs_k[pred_label]))
+        out_k = forward_bag(model, single_patch, device, use_precomputed)
+        scores.append(float(out_k.probs[out.pred_label]))
 
     weights = np.array(scores, dtype=np.float32)
-    return pred_label, probs, weights
+    return out.pred_label, out.probs, weights
 
 
 def run_inference_single_wsi(model, features, device, use_precomputed, explanation_method) -> tuple:
@@ -541,6 +544,13 @@ def process_task_on_split(
     srg_records: list[dict] = []
 
     print(f"\n  [{split_name}] Tarea '{task}' — método '{explanation_method}'")
+
+    if compute_srg_flag and not use_precomputed:
+        print(
+            "  [WARN] SRG omitido: compute_srg requiere embeddings precomputados "
+            "porque compute_srg() llama a forward_from_embeddings()."
+        )
+        compute_srg_flag = False
 
     if compute_srg_flag and df_srg is not None:
         df_all = (

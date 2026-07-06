@@ -189,13 +189,13 @@ def infer_split(
             continue
 
         try:
-            pred_label, probs = forward_bag(model, sample.features, device, use_precomputed)
+            out = forward_bag(model, sample.features, device, use_precomputed)
         except Exception as e:
             print(f"    [ERROR] Inferencia fallida para {sample.wsi_stem}: {e}")
             continue
 
-        entry = {f"{task}_true": sample.true_label, f"{task}_pred": pred_label}
-        for c, p in enumerate(probs):
+        entry = {f"{task}_true": sample.true_label, f"{task}_pred": out.pred_label}
+        for c, p in enumerate(out.probs):
             entry[f"{task}_prob_{c}"] = float(p)
         records[sample.wsi_stem] = entry
 

@@ -305,6 +305,15 @@ class TaskContext:
     num_classes: int
 
 
+@dataclass
+class BagForwardOutput:
+    pred_label: int
+    probs: np.ndarray
+    logits: torch.Tensor
+    patch_logits_list: list
+    weights_list: list
+
+
 def for_each_task_and_method(
     test_results_path: str,
     tasks: list[str],
@@ -396,33 +405,29 @@ def forward_bag(
     features: torch.Tensor,
     device: torch.device,
     use_precomputed: bool,
-    return_raw: bool = False,
-):
+) -> BagForwardOutput:
     """
     Forward pass de una bag completa (o de tamaño 1, para el método 'single').
 
     Es el paso que predict_wsi(), _compute_attention_weights() y el primer
     paso de _compute_single_weights() hacían cada uno por su cuenta con
-    código casi idéntico.
-
-    Returns
-    -------
-    pred_label : int
-    probs      : ndarray (num_classes,)
-    raw_output : tuple del modelo (solo si return_raw=True) — necesario para
-                 el método 'attention', que además necesita weights_list.
+    código casi idéntico. Devuelve siempre la misma información que expone
+    el modelo, más la predicción derivada de los logits de WSI.
     """
     feats = features.to(device)
 
     if use_precomputed:
-        raw = model.forward_from_embeddings([feats])
+        logits, patch_logits_list, weights_list = model.forward_from_embeddings([feats])
     else:
-        raw = model([feats])
+        logits, patch_logits_list, weights_list = model([feats])
 
-    logits = raw[0]
     probs = torch.softmax(logits[0], dim=0).cpu().numpy()
     pred_label = int(np.argmax(probs))
 
-    if return_raw:
-        return pred_label, probs, raw
-    return pred_label, probs
+    return BagForwardOutput(
+        pred_label=pred_label,
+        probs=probs,
+        logits=logits,
+        patch_logits_list=patch_logits_list,
+        weights_list=weights_list,
+    )
