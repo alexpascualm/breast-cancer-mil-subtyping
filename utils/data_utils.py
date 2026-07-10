@@ -62,13 +62,14 @@ def map_ki67(value, threshold: float = KI67_THRESHOLD) -> int:
 
 
 def map_molecular_subtype(value: str) -> int:
+    """
+    Maps the clinical 'Molecular subtype' Excel value to its int label.
+    Returns -1 (missing/unparseable) if `value` isn't one of
+    MOLECULAR_SUBTYPE_MAP's keys, matching the sentinel convention used by
+    map_ki67() and the biomarker columns (BIOMARKER_BINARY_MAP.get(..., -1)).
+    """
     v = str(value).strip()
-    if v not in MOLECULAR_SUBTYPE_MAP:
-        raise ValueError(
-            f"Unknown molecular subtype '{v}'. "
-            f"Expected one of {list(MOLECULAR_SUBTYPE_MAP.keys())}"
-        )
-    return MOLECULAR_SUBTYPE_MAP[v]
+    return MOLECULAR_SUBTYPE_MAP.get(v, -1)
 
 
 def infer_subtype_from_biomarkers(er, pr, her2, ki67, missing_value=-1):

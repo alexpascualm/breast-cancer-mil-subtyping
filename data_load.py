@@ -45,7 +45,8 @@ def create_file_label_df(
     -------
     pd.DataFrame with columns:
         features, patient_id,
-        molecular_subtype, molecular_subtype_label,
+        molecular_subtype        ← 0-3, or -1 if missing/unparseable
+        molecular_subtype_str,
         er, pr, her2, ki67      ← binary labels (0/1, -1 if missing/unparseable)
         molecular_subtype_from_biomarkers ← subtype inferred from er/pr/her2/ki67
             via infer_subtype_from_biomarkers() (0-3, -1 if any biomarker missing)
@@ -68,11 +69,10 @@ def create_file_label_df(
 
         row = row.iloc[0]
 
-        try:
-            molecular_subtype_label = map_molecular_subtype(row.get('Molecular subtype', -1))
-        except ValueError as e:
-            print(f"  [WARN] {slide_id}: {e} - skipping.")
-            continue
+        molecular_subtype_label = map_molecular_subtype(row.get('Molecular subtype', -1))
+        if molecular_subtype_label == -1:
+            print(f"  [WARN] {slide_id}: unrecognised 'Molecular subtype' value "
+                  f"'{row.get('Molecular subtype', '')}' - labelled -1, row kept for other tasks.")
 
         ki67_raw = row.get('Ki67', np.nan)
 
