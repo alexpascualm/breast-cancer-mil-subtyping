@@ -87,8 +87,8 @@ def parse_args():
         help="Carpeta de salida. Por defecto: <source_results_path>/test_results")
 
     parser.add_argument("--tasks", type=str, nargs="+",
-        default=["er", "pr", "her2", "ki67", "molecular_subtype"],
-        choices=["er", "pr", "her2", "ki67", "molecular_subtype"])
+        default=["er", "pr", "her2", "ki67", "molecular_subtype", "molecular_subtype_from_biomarkers"],
+        choices=["er", "pr", "her2", "ki67", "molecular_subtype", "molecular_subtype_from_biomarkers"])
 
     parser.add_argument("--rank_metric", type=str, default="balanced_accuracy")
 

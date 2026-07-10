@@ -123,6 +123,7 @@ TASKS_NUM_CLASSES = {
     "her2": 2,
     "ki67": 2,
     "molecular_subtype": 4,
+    "molecular_subtype_from_biomarkers": 4,
 }
 
 
@@ -163,8 +164,8 @@ def parse_args():
     parser.add_argument("--output_path", type=str, default=None,
         help="Carpeta de salida. Por defecto: <parent de test_results_path>/heatmaps")
     parser.add_argument("--tasks", type=str, nargs="+",
-        default=["er", "pr", "her2", "ki67", "molecular_subtype"],
-        choices=["er", "pr", "her2", "ki67", "molecular_subtype"],
+        default=["er", "pr", "her2", "ki67", "molecular_subtype", "molecular_subtype_from_biomarkers"],
+        choices=["er", "pr", "her2", "ki67", "molecular_subtype", "molecular_subtype_from_biomarkers"],
         help="Tareas para las que generar mapas de calor.")
 
     parser.add_argument("--n_images", type=int, default=10,

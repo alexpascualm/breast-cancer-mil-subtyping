@@ -50,7 +50,7 @@ def parse_args():
 
     # ── Tarea ─────────────────────────────────────────────────────────────────
     parser.add_argument("--task", type=str, default="molecular_subtype",
-                        choices=["molecular_subtype", "er", "pr", "her2", "ki67"],
+                        choices=["molecular_subtype", "molecular_subtype_from_biomarkers", "er", "pr", "her2", "ki67"],
                         help="Target de clasificación")
     parser.add_argument("--ki67_threshold", type=float, default=0.14,
                         help="Umbral de binarización de Ki67")
@@ -112,6 +112,7 @@ def parse_args():
 # ──────────────────────────────────────────────────────────────────────────────
 
 ALL_TASKS = [
+    "molecular_subtype_from_biomarkers",
     "er",
     "pr",
     "her2",

@@ -10,7 +10,10 @@ import gc
 from PIL import Image
 import sys
 
-from utils.data_utils import map_molecular_subtype, map_ki67, MOLECULAR_SUBTYPE_MAP, BIOMARKER_BINARY_MAP, KI67_THRESHOLD
+from utils.data_utils import (
+    map_molecular_subtype, map_ki67, infer_subtype_from_biomarkers,
+    MOLECULAR_SUBTYPE_MAP, BIOMARKER_BINARY_MAP, KI67_THRESHOLD,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DATAFRAME BUILDER
@@ -44,6 +47,8 @@ def create_file_label_df(
         features, patient_id,
         molecular_subtype, molecular_subtype_label,
         er, pr, her2, ki67      ← binary labels (0/1, -1 if missing/unparseable)
+        molecular_subtype_from_biomarkers ← subtype inferred from er/pr/her2/ki67
+            via infer_subtype_from_biomarkers() (0-3, -1 if any biomarker missing)
         ki67_raw                ← original value from Excel
         Extra info
     """
@@ -71,17 +76,29 @@ def create_file_label_df(
 
         ki67_raw = row.get('Ki67', np.nan)
 
+        er_label   = BIOMARKER_BINARY_MAP.get(str(row.get('ER',   '')).strip(), -1)
+        pr_label   = BIOMARKER_BINARY_MAP.get(str(row.get('PR',   '')).strip(), -1)
+        her2_label = BIOMARKER_BINARY_MAP.get(str(row.get('HER2', '')).strip(), -1)
+        ki67_label = map_ki67(ki67_raw, threshold=ki67_threshold)
+
         record = {
             'features':                os.path.join(images_path, f),
             'patient_id':              row.get('Patient ID', slide_id),
             # ── Molecular subtype ──────────────────────────────────────────
-            'molecular_subtype':     molecular_subtype_label,        
-            'molecular_subtype_str': str(row.get('Molecular subtype', '')).strip(),  
+            'molecular_subtype':     molecular_subtype_label,
+            'molecular_subtype_str': str(row.get('Molecular subtype', '')).strip(),
             # ── Biomarkers: one binary label per marker ───────────────────
-            'er':   BIOMARKER_BINARY_MAP.get(str(row.get('ER',   '')).strip(), -1),
-            'pr':   BIOMARKER_BINARY_MAP.get(str(row.get('PR',   '')).strip(), -1),
-            'her2': BIOMARKER_BINARY_MAP.get(str(row.get('HER2', '')).strip(), -1),
-            'ki67': map_ki67(ki67_raw, threshold=ki67_threshold),
+            'er':   er_label,
+            'pr':   pr_label,
+            'her2': her2_label,
+            'ki67': ki67_label,
+            # ── Molecular subtype inferred (surrogate IHC rule) from the ───
+            # biomarker labels above — kept as a separate task/label so it
+            # can later be trained/predicted directly by a model, distinct
+            # from the clinical 'molecular_subtype' ground truth.
+            'molecular_subtype_from_biomarkers': infer_subtype_from_biomarkers(
+                er_label, pr_label, her2_label, ki67_label
+            ),
             # ── Extra info (reference / stratification) ───────────────────
             'ki67_raw':        ki67_raw,
             'her2_expression': row.get('HER2 Expression', np.nan),
@@ -107,6 +124,13 @@ class Patches_WSI_Dataset(Dataset):
     'molecular_subtype'
         label → LongTensor scalar (0-3, see MOLECULAR_SUBTYPE_MAP)
 
+    'molecular_subtype_from_biomarkers'
+        label → LongTensor scalar (0-3, see MOLECULAR_SUBTYPE_MAP)
+        Subtype inferred from er/pr/her2/ki67 via the surrogate IHC rule
+        (infer_subtype_from_biomarkers), instead of the clinical
+        'molecular_subtype' ground truth. Lets a model be trained/tested
+        to predict this derived label directly.
+
     'er' | 'pr' | 'her2' | 'ki67'
         label → LongTensor scalar (0 or 1)
         One dataset / model per biomarker.
@@ -118,14 +142,15 @@ class Patches_WSI_Dataset(Dataset):
     indices : list[int]
         Row indices into dataframe to use.
     task : str
-        'molecular_subtype', 'er', 'pr', 'her2', or 'ki67'.
+        'molecular_subtype', 'molecular_subtype_from_biomarkers',
+        'er', 'pr', 'her2', or 'ki67'.
     patch_resize_size: int
         WSI-patchs resize cuadratic size for model inputs
     load_on_demand : bool
         False → pre-load all patch tensors into CPU RAM.
         True  → read H5 in __getitem__ (lower RAM, slower I/O).
     """
-    SUPPORTED_TASKS = ('molecular_subtype', 'er', 'pr', 'her2', 'ki67')
+    SUPPORTED_TASKS = ('molecular_subtype', 'molecular_subtype_from_biomarkers', 'er', 'pr', 'her2', 'ki67')
 
     def __init__(
         self,
@@ -207,8 +232,8 @@ class Patches_WSI_Dataset(Dataset):
     # ── Convenience ───────────────────────────────────────────────────────────
     @property
     def num_classes(self) -> int:
-        """Output units needed: 4 for molecular subtype, 2 for any binary biomarker."""
-        if self.task == 'molecular_subtype':
+        """Output units needed: 4 for molecular subtype (clinical or biomarker-derived), 2 for any binary biomarker."""
+        if self.task in ('molecular_subtype', 'molecular_subtype_from_biomarkers'):
             return len(MOLECULAR_SUBTYPE_MAP)   # 4
         return 2                                # binary: 0 / 1
 
@@ -240,7 +265,7 @@ class Embeddings_WSI_Dataset(Dataset):
         incluso para datasets grandes.
     """
 
-    SUPPORTED_TASKS = ('molecular_subtype', 'er', 'pr', 'her2', 'ki67')
+    SUPPORTED_TASKS = ('molecular_subtype', 'molecular_subtype_from_biomarkers', 'er', 'pr', 'her2', 'ki67')
 
     def __init__(
         self,
@@ -318,7 +343,7 @@ class Embeddings_WSI_Dataset(Dataset):
 
     @property
     def num_classes(self) -> int:
-        if self.task == 'molecular_subtype':
+        if self.task in ('molecular_subtype', 'molecular_subtype_from_biomarkers'):
             return len(MOLECULAR_SUBTYPE_MAP)
         return 2
         

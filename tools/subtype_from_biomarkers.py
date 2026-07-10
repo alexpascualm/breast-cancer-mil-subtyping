@@ -63,6 +63,9 @@ from sklearn.metrics import (
     cohen_kappa_score,
 )
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from utils.data_utils import infer_subtype_from_biomarkers
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTES
@@ -87,62 +90,10 @@ SUBTYPE_LABELS = [SUBTYPE_NAMES[k] for k in SUBTYPE_ORDER]
 # LÓGICA DE SUBTIPADO IHC SURROGATE
 # ──────────────────────────────────────────────────────────────────────────────
 
-def infer_subtype(er: int, pr: int, her2: int, ki67: int) -> int | None:
-    """
-    Infiere el subtipo molecular a partir de los biomarcadores IHC binarios,
-    siguiendo la clasificación surrogate de la Tabla 1.
-
-    Parámetros
-    ----------
-    er   : 0=negativo, 1=positivo
-    pr   : 0=negativo, 1=positivo
-    her2 : 0=negativo, 1=overexpressed/positivo
-    ki67 : 0=bajo,     1=alto
-
-    Retorna
-    -------
-    int  : 0=Luminal A, 1=Luminal B, 2=HER2-positive, 3=TNBC
-    None : si algún biomarcador es NaN / inválido
-
-    Lógica de prioridad
-    -------------------
-    La condición de ER negativo se evalúa antes que la de ER positivo.
-    Dentro de ER negativo, HER2 determina si es HER2-positive o TNBC.
-    Dentro de ER positivo, ki67 determina Luminal A (bajo) o Luminal B (alto).
-    """
-    # Validar que no haya NaN
-    for val in (er, pr, her2, ki67):
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return None
-
-    er   = int(er)
-    pr   = int(pr)
-    her2 = int(her2)
-    ki67 = int(ki67)
-
-    # ── Rama ER negativo ──────────────────────────────────────────────────────
-    if er == 0:
-        if pr == 0:
-            if her2 == 1:
-                return 2   # HER2-positive
-            else:
-                return 3   # TNBC
-        else:
-            # ER negativo + PR positivo: caso atípico no cubierto explícitamente
-            # en la tabla; se asigna HER2-positive si HER2=1, TNBC si HER2=0
-            # (comportamiento conservador: se prioriza HER2 sobre PR en ausencia de ER)
-            if her2 == 1:
-                return 2
-            else:
-                return 3
-
-    # ── Rama ER positivo ─────────────────────────────────────────────────────
-    # ER=1: Luminal A o Luminal B según ki67
-    if ki67 == 0:
-        return 0   # Luminal A
-    else:
-        return 1   # Luminal B
-
+# NOTA: la regla de clasificación surrogate (Tabla 1) vive en una única
+# fuente de verdad: utils.data_utils.infer_subtype_from_biomarkers(). Aquí se
+# llama con missing_value=None para conservar el filtrado NaN-based que usa
+# el resto de este script (classification_report, notna(), etc.).
 
 def infer_subtype_row(row: pd.Series, suffix: str) -> int | None:
     """
@@ -160,7 +111,7 @@ def infer_subtype_row(row: pd.Series, suffix: str) -> int | None:
             "Asegúrate de que el CSV contiene columnas er/pr/her2/ki67 "
             f"con sufijo '_{suffix}'."
         )
-    return infer_subtype(er, pr, her2, ki67)
+    return infer_subtype_from_biomarkers(er, pr, her2, ki67, missing_value=None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

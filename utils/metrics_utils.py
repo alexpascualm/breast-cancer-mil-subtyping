@@ -169,7 +169,7 @@ def compute_breast_metrics(task, y_true, y_pred, y_prob):
     Selecciona la función de métricas adecuada según la tarea.
 
     Args:
-        task (str): 'molecular_subtype' → multiclase (4 clases)
+        task (str): 'molecular_subtype' | 'molecular_subtype_from_biomarkers' → multiclase (4 clases)
                     'er'|'pr'|'her2'|'ki67' → binaria
         y_true, y_pred: arrays / Tensors.
         y_prob: array / Tensor (N, num_classes) con probabilidades completas.
@@ -177,7 +177,7 @@ def compute_breast_metrics(task, y_true, y_pred, y_prob):
     Returns:
         dict con las métricas correspondientes.
     """
-    if task == "molecular_subtype":
+    if task in ("molecular_subtype", "molecular_subtype_from_biomarkers"):
         return compute_multiclass_metrics(y_true, y_pred, y_prob)
     else:
         return compute_binary_metrics(y_true, y_pred, y_prob)

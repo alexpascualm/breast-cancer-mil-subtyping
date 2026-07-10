@@ -393,7 +393,7 @@ def run_epoch(
 
     with torch.set_grad_enabled(mode == "train"):
 
-        num_classes = 4 if task == "molecular_subtype" else 2
+        num_classes = 4 if task in ("molecular_subtype", "molecular_subtype_from_biomarkers") else 2
 
         all_y_true, all_y_pred, all_y_prob = [], [], []
         heatmap_list = []

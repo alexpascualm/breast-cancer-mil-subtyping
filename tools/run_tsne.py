@@ -45,7 +45,7 @@ def parse_args():
 
     # Columna inicial para colorear (opcional)
     parser.add_argument("--color_col",         type=str, default='molecular_subtype',
-                        choices=["molecular_subtype", "er", "pr", "her2", "ki67"],
+                        choices=["molecular_subtype", "molecular_subtype_from_biomarkers", "er", "pr", "her2", "ki67"],
                         help="Columna inicial para colorear (opcional, se puede cambiar en el HTML)")
 
     # Columnas extra que aparecen en el tooltip al pasar el ratón

@@ -1,4 +1,5 @@
 import re
+import numpy as np
 # ──────────────────────────────────────────────────────────────────────────────
 # LABEL MAPPINGS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,3 +69,44 @@ def map_molecular_subtype(value: str) -> int:
             f"Expected one of {list(MOLECULAR_SUBTYPE_MAP.keys())}"
         )
     return MOLECULAR_SUBTYPE_MAP[v]
+
+
+def infer_subtype_from_biomarkers(er, pr, her2, ki67, missing_value=-1):
+    """
+    Infers the surrogate molecular subtype from binarised IHC biomarkers
+    (ER/PR/HER2/Ki67):
+      ER-  HER2+     → HER2(+)         (2)
+      ER-  HER2-     → Triple negative (3)
+      ER+  ki67 low  → Luminal A       (0)
+      ER+  ki67 high → Luminal B       (1)
+    (PR does not change the outcome in this surrogate rule.)
+
+    Single source of truth for this rule: used both to build the training
+    dataframe (data_load.py, `missing_value=-1` to match its int sentinel
+    convention) and by tools/subtype_from_biomarkers.py's post-hoc analysis
+    (`missing_value=None`, to keep its pandas NaN-based filtering).
+
+    Parameters
+    ----------
+    er, pr, her2 : 0=negative, 1=positive
+    ki67         : 0=low, 1=high
+    missing_value
+        Value returned if any biomarker is missing (None, NaN, or -1).
+
+    Returns
+    -------
+    One of MOLECULAR_SUBTYPE_MAP's values (0-3), or `missing_value` if any
+    biomarker is missing/unparseable.
+    """
+    def _is_missing(v):
+        return v is None or v == -1 or (isinstance(v, float) and np.isnan(v))
+
+    if any(_is_missing(v) for v in (er, pr, her2, ki67)):
+        return missing_value
+
+    er, pr, her2, ki67 = int(er), int(pr), int(her2), int(ki67)
+
+    if er == 0:
+        return 2 if her2 == 1 else 3   # HER2(+) / Triple negative
+
+    return 1 if ki67 == 1 else 0       # Luminal B / Luminal A

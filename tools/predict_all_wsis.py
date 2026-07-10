@@ -67,6 +67,7 @@ TASKS_NUM_CLASSES = {
     "her2": 2,
     "ki67": 2,
     "molecular_subtype": 4,
+    "molecular_subtype_from_biomarkers": 4,
 }
 ALL_TASKS = list(TASKS_NUM_CLASSES.keys())
 
