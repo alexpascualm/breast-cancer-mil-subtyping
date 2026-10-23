@@ -1,4 +1,4 @@
-# WSI Breast Cancer Molecular Subtyping
+# Breast Cancer Molecular Subtyping
 
 Pipeline de Multiple Instance Learning (MIL) para la predicción de subtipos moleculares y
 biomarcadores de cáncer de mama a partir de Whole Slide Images (WSI), usando el dataset BCNB.
@@ -45,7 +45,7 @@ Define las rutas de tu máquina como variables de entorno y créalo con `docker 
 reutilizar el mismo comando cambiando solo estas variables:
 
 ```bash
-export WORKSPACE_DIR=/home/apasmel/nas_alejandro_pascual/WSI-Breast-Cancer-Molecular-Subtyping
+export WORKSPACE_DIR=/home/apasmel/nas_alejandro_pascual/breast-cancer-mil-subtyping
 export DATA_DIR=/mnt/ART-HDD-001
 export CONTAINER_NAME=apasmel_breast_0
 export GPU_DEVICE=0
